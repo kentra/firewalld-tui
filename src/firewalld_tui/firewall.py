@@ -32,8 +32,8 @@ class ZoneInfo:
 
 
 @dataclass
-class RuleRow:
-    """A single row in the PanOS-style rules table."""
+class PolicyRow:
+    """A single row in the PAN-OS style policies table."""
 
     source: str
     destination: str
@@ -449,14 +449,14 @@ def _target_action(target: str) -> str:
     }.get(target, "allow")
 
 
-def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
-    """Synthesize PanOS-style rule rows from a zone's configuration."""
-    rows: list[RuleRow] = []
+def policy_rows_from_info(info: ZoneInfo) -> list[PolicyRow]:
+    """Synthesize PAN-OS style policy rows from a zone's configuration."""
+    rows: list[PolicyRow] = []
 
     for rule in info.rich_rules:
         parsed = parse_rich_rule(rule)
         rows.append(
-            RuleRow(
+            PolicyRow(
                 source=parsed["source"],
                 destination=parsed["destination"],
                 protocol=parsed["protocol"],
@@ -472,7 +472,7 @@ def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
         for proto, port in resolve_service(svc):
             service_port = svc if port == svc else f"{svc} ({port})"
             rows.append(
-                RuleRow(
+                PolicyRow(
                     source="any",
                     destination="any",
                     protocol=proto,
@@ -490,7 +490,7 @@ def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
         else:
             port_num, proto = port, "any"
         rows.append(
-            RuleRow(
+            PolicyRow(
                 source="any",
                 destination="any",
                 protocol=proto,
@@ -505,7 +505,7 @@ def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
     source_action = _target_action(info.target)
     for src in info.sources:
         rows.append(
-            RuleRow(
+            PolicyRow(
                 source=src,
                 destination="any",
                 protocol="any",
@@ -523,6 +523,14 @@ def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
     return rows
 
 
-def build_rule_rows(zone: str | None = None, permanent: bool = False) -> list[RuleRow]:
-    """Fetch a zone's configuration and synthesize its rule rows."""
-    return rule_rows_from_info(list_zone(zone, permanent))
+def build_policy_rows(
+    zone: str | None = None, permanent: bool = False
+) -> list[PolicyRow]:
+    """Fetch a zone's configuration and synthesize its policy rows."""
+    return policy_rows_from_info(list_zone(zone, permanent))
+
+
+# Backwards-compatible aliases (smoke_test.py and external callers).
+RuleRow = PolicyRow
+rule_rows_from_info = policy_rows_from_info
+build_rule_rows = build_policy_rows

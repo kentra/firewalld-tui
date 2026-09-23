@@ -11,6 +11,7 @@ from loguru import logger
 CONFIG_DIR = Path.home() / ".firewalld-tui"
 CONFIG_FILE = CONFIG_DIR / "firewalld-tui.conf"
 LOG_FILE = CONFIG_DIR / "firewalld-tui.log"
+POLICIES_FILE = CONFIG_DIR / "policies.json"
 
 DEFAULT_LOGGING: dict[str, str] = {
     "level": "INFO",
@@ -103,6 +104,95 @@ def save_theme(theme: str) -> None:
     with open(CONFIG_FILE, "w") as f:
         parser.write(f)
     logger.info("theme saved: {}", theme)
+
+
+def load_policies() -> dict[str, dict]:
+    """Load the policy store (ref -> entry dict).
+
+    Entry keys: name, description, disabled (bool), kind, detail, action,
+    source, destination, protocol, service_port, zone, permanent.
+    firewalld refs remain the source of truth for *enabled* policies;
+    disabled entries are intentionally TUI-owned orphans.
+    Returns an empty dict when the file is missing or unparseable.
+    """
+    import json
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not POLICIES_FILE.exists():
+        return {}
+    try:
+        data = json.loads(POLICIES_FILE.read_text())
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
+    except (OSError, ValueError) as e:
+        logger.warning("Cannot read policies file {}: {}", POLICIES_FILE, e)
+    return {}
+
+
+_POLICY_EXTRA_KEYS = (
+    "kind",
+    "detail",
+    "action",
+    "source",
+    "destination",
+    "protocol",
+    "service_port",
+    "zone",
+    "permanent",
+)
+
+
+def _write_policies(policies: dict[str, dict]) -> None:
+    import json
+
+    try:
+        POLICIES_FILE.write_text(json.dumps(policies, indent=2))
+    except OSError as e:
+        logger.warning("Cannot save policies file {}: {}", POLICIES_FILE, e)
+
+
+def save_policy(
+    ref: str, name: str, description: str = "", *, disabled: bool = False, **extra
+) -> None:
+    """Persist a policy entry for a firewalld ref.
+
+    Fresh saves default to enabled; extra fields (kind, detail, zone, ...)
+    are stored when given, otherwise preserved from the existing entry.
+    """
+    policies = load_policies()
+    entry: dict = {"name": name, "description": description, "disabled": disabled}
+    old = policies.get(ref, {})
+    for key in _POLICY_EXTRA_KEYS:
+        if key in extra and extra[key] not in ("", None):
+            entry[key] = extra[key]
+        elif key in old:
+            entry[key] = old[key]
+    policies[ref] = entry
+    _write_policies(policies)
+    logger.info("policy saved: {} -> {} (disabled={})", ref, name, disabled)
+
+
+def set_policy_enabled(ref: str, enabled: bool) -> None:
+    """Flip the disabled flag on an existing entry (no-op if absent)."""
+    policies = load_policies()
+    entry = policies.get(ref)
+    if entry is None:
+        return
+    entry["disabled"] = not enabled
+    _write_policies(policies)
+
+
+def is_policy_disabled(ref: str) -> bool:
+    """Return True when the stored entry is marked disabled."""
+    return bool(load_policies().get(ref, {}).get("disabled", False))
+
+
+def delete_policy(ref: str) -> None:
+    """Remove a policy entry from the store (no-op if absent)."""
+    policies = load_policies()
+    if ref in policies:
+        del policies[ref]
+        _write_policies(policies)
 
 
 class InterceptHandler(logging.Handler):
