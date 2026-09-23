@@ -1,0 +1,19 @@
+[project]
+name = "firewalld-tui"
+version = "0.1.0"
+description = "A TUI for managing firewalld firewall configuration"
+readme = "README.md"
+authors = [
+    { name = "Daniel Kolstad", email = "admin@kenra.org" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "textual>=8.2.8",
+]
+
+[project.scripts]
+firewalld-tui = "firewalld_tui:main"
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
