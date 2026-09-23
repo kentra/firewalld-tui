@@ -38,7 +38,7 @@ uv run firewalld-tui
 | `R` | Add rich rule |
 | `Delete` | Remove rich rule |
 | `t` | Toggle runtime/permanent mode |
-| `F1` | Toggle dark mode |
+| `F1` | Change theme (fuzzy picker) |
 
 ## Features
 

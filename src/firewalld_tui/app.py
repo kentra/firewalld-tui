@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from textual import on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, InvalidThemeError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
@@ -21,6 +21,7 @@ from textual.widgets import (
 from loguru import logger
 
 from . import firewall
+from .config import CONFIG_FILE, load_theme, save_theme
 
 BINDINGS = [
     Binding("q", "quit", "Quit"),
@@ -37,7 +38,7 @@ BINDINGS = [
     Binding("R", "add_rich_rule", "Add Rich Rule"),
     Binding("delete", "remove_rich_rule", "Remove Rich Rule"),
     Binding("t", "toggle_mode", "Toggle Runtime/Permanent"),
-    Binding("f1", "toggle_dark", "Toggle Dark Mode"),
+    Binding("f1", "change_theme", "Change Theme"),
 ]
 
 
@@ -327,6 +328,19 @@ class FirewalldTUI(App):
     def __init__(self) -> None:
         super().__init__()
         self.zones: list[str] = []
+        saved_theme = load_theme()
+        try:
+            self.theme = saved_theme
+        except InvalidThemeError:
+            logger.warning(
+                "Unknown theme {!r} in {}, using default",
+                saved_theme,
+                CONFIG_FILE,
+            )
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Persist theme changes (e.g. from the F1 picker) to the config."""
+        save_theme(theme_name)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -340,7 +354,7 @@ class FirewalldTUI(App):
                 with VerticalScroll(id="zone-details"):
                     pass
         with Horizontal(id="action-bar"):
-            yield Static("q:Quit r:Refresh d:Default a:Addsvc x:Rmsvc p:Rmport P:Rmport i:Rmiface I:Rmiface s:Rmsrc S:Rmsrc R:Richrule del:Rmrichrule t:Toggle f1:Dark")
+            yield Static("q:Quit r:Refresh d:Default a:Addsvc x:Rmsvc p:Rmport P:Rmport i:Rmiface I:Rmiface s:Rmsrc S:Rmsrc R:Richrule del:Rmrichrule t:Toggle f1:Theme")
         yield Footer()
 
     def on_mount(self) -> None:
