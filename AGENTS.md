@@ -65,4 +65,5 @@ No linter or formatter is configured.
 
 - loguru writes to `~/.firewalld-tui/firewalld-tui.log` (in Docker: `/root/.firewalld-tui/`)
 - `level`, `rotation`, `retention` are set in `~/.firewalld-tui/firewalld-tui.conf` (`[logging]` section, created with defaults on first run)
+- `[ui] theme` in the same conf stores the Textual theme name; F1 opens Textual's fuzzy theme picker, `FirewalldTUI.watch_theme` persists changes (unknown names fall back to `textual-dark` with a logged warning)
 - Config/logging setup lives in `config.py`; `firewall.py` logs every `firewall-cmd` call (DEBUG) and failures, `app.py` logs errors + successful mutations (INFO)

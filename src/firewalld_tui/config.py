@@ -18,12 +18,33 @@ DEFAULT_LOGGING: dict[str, str] = {
     "retention": "7 days",
 }
 
+DEFAULT_THEME = "textual-dark"
+
 _DEFAULT_CONF = """\
 [logging]
 level = INFO
 rotation = 10 MB
 retention = 7 days
+
+[ui]
+theme = textual-dark
 """
+
+
+def _read_config() -> tuple[ConfigParser | None, ConfigParserError | None]:
+    """Create the config dir/file if needed and parse it.
+
+    Returns (parser, error); parser is None when the file is unparseable.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(_DEFAULT_CONF)
+    parser = ConfigParser()
+    try:
+        parser.read(CONFIG_FILE)
+        return parser, None
+    except ConfigParserError as e:
+        return None, e
 
 
 def load_config() -> tuple[dict[str, str], list[str]]:
@@ -32,30 +53,56 @@ def load_config() -> tuple[dict[str, str], list[str]]:
     Returns the settings plus any warnings (emitted later, once the file
     sink exists, so loguru never writes to stderr).
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_FILE.exists():
-        CONFIG_FILE.write_text(_DEFAULT_CONF)
-
     settings = dict(DEFAULT_LOGGING)
     warnings: list[str] = []
-    parser = ConfigParser()
-    section = None
-    try:
-        parser.read(CONFIG_FILE)
-        if parser.has_section("logging"):
-            section = parser["logging"]
-        else:
-            warnings.append(
-                f"Missing [logging] section in {CONFIG_FILE}, using defaults"
-            )
-    except ConfigParserError as e:
-        warnings.append(f"Invalid config file {CONFIG_FILE}: {e}")
+    parser, error = _read_config()
 
-    if section is not None:
+    if error is not None:
+        warnings.append(f"Invalid config file {CONFIG_FILE}: {error}")
+        return settings, warnings
+
+    assert parser is not None
+    if parser.has_section("logging"):
         for key in settings:
-            if key in section:
-                settings[key] = section[key]
+            if key in parser["logging"]:
+                settings[key] = parser["logging"][key]
+    else:
+        warnings.append(
+            f"Missing [logging] section in {CONFIG_FILE}, using defaults"
+        )
     return settings, warnings
+
+
+def load_theme() -> str:
+    """Return the saved theme name (default when missing/unparseable).
+
+    The name is returned as-is; validation against available Textual
+    themes happens in the app.
+    """
+    parser, _ = _read_config()
+    if parser is None:
+        return DEFAULT_THEME
+    if parser.has_section("ui") and parser.has_option("ui", "theme"):
+        return parser.get("ui", "theme")
+    return DEFAULT_THEME
+
+
+def save_theme(theme: str) -> None:
+    """Persist the theme name to the config file, preserving other sections."""
+    parser, error = _read_config()
+    if parser is None:
+        logger.warning(
+            "Cannot save theme to {}: {}", CONFIG_FILE, error or "unparseable"
+        )
+        return
+    if load_theme() == theme:
+        return
+    if not parser.has_section("ui"):
+        parser.add_section("ui")
+    parser.set("ui", "theme", theme)
+    with open(CONFIG_FILE, "w") as f:
+        parser.write(f)
+    logger.info("theme saved: {}", theme)
 
 
 class InterceptHandler(logging.Handler):

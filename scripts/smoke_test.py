@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from textual.command import CommandPalette
 from textual.widgets import Button, Input, Static
 
 from firewalld_tui import firewall
@@ -19,6 +20,7 @@ from firewalld_tui.app import (
     ServiceSelectScreen,
     ZoneSelectScreen,
 )
+from firewalld_tui.config import CONFIG_FILE, LOG_FILE, load_theme
 
 failures: list[str] = []
 
@@ -237,6 +239,41 @@ async def run() -> None:
         await pilot.pause()
         check(app.current_zone == target, f"selection preserved after refresh (got {app.current_zone!r})")
         check(bool(app.zones), "zones reloaded")
+
+        # --- f1: theme picker + persistence ---
+        print("theme picker (f1)")
+        orig_theme = app.theme
+        await pilot.press("f1")
+        await pilot.pause()
+        check(isinstance(app.screen, CommandPalette), "theme picker opened on f1")
+        await pilot.press("escape")
+        await pilot.pause()
+        check(not isinstance(app.screen, CommandPalette), "theme picker closed on escape")
+        check(app.theme == orig_theme, "theme unchanged after open/close")
+
+        test_theme = "nord" if "nord" in app.available_themes else next(iter(app.available_themes))
+        app.theme = test_theme
+        await pilot.pause()
+        check(app.theme == test_theme, f"theme applied ({test_theme})")
+        conf_text = CONFIG_FILE.read_text()
+        check(f"theme = {test_theme}" in conf_text, "theme saved to conf file")
+        check("[logging]" in conf_text, "logging section preserved on theme save")
+        check(load_theme() == test_theme, "load_theme returns saved theme")
+
+        app.theme = orig_theme
+        await pilot.pause()
+        check(f"theme = {orig_theme}" in CONFIG_FILE.read_text(), "original theme restored in conf")
+
+    # --- invalid theme name falls back to default ---
+    print("invalid theme fallback")
+    good_conf = CONFIG_FILE.read_text()
+    CONFIG_FILE.write_text(
+        good_conf.replace(f"theme = {load_theme()}", "theme = bogus-theme")
+    )
+    app2 = FirewalldTUI()
+    check(app2.theme == "textual-dark", f"invalid theme falls back to default (got {app2.theme!r})")
+    check("bogus-theme" in LOG_FILE.read_text(), "fallback warning logged to file")
+    CONFIG_FILE.write_text(good_conf)
 
     # --- teardown: restore interface binding ---
     if orig_iface_zone and ifaces:
