@@ -22,7 +22,7 @@ scripts/
 └── smoke_test.py    # Pilot-based e2e test of all TUI bindings
 ```
 
-- `firewall.py` calls `firewall-cmd` via subprocess, not D-Bus
+- `firewall.py` calls `firewall-cmd` via subprocess, not D-Bus; `rule_rows_from_info()` synthesizes table rows (rich rules → services → ports → sources), resolving service protocols/ports from `/usr/lib/firewalld/services/*.xml`
 - `app.py` contains all Textual widgets, screens, and keyboard bindings
 - No test suite exists yet
 
@@ -58,6 +58,7 @@ No linter or formatter is configured.
 - `app.py` uses reactive properties (`current_zone`, `permanent_mode`) to drive UI updates
 - Widget IDs must be unique; mounting a duplicate ID causes Textual errors
 - The `#zone-header` widget is created in `compose()` and updated in-place via `.update()` — don't mount a new one
+- `#rule-table` rows are parallel to `app._rule_rows` (both rebuilt in `load_zone_details`); the Delete key removes the selected row's firewall object via `action_remove_selected_row` — keep them in sync
 - Textual 8 gotchas: `str(widget)` returns `"Label()"` not the text (use `ListItem(..., name=value)` / `event.item.name`); `ListView` uses `.index` not `.highlighted`; widget content is `.content` not `.renderable`
 - Don't call `query_one()` inside `compose()` — widgets aren't mounted yet; pass values via `Input(value=...)` instead
 

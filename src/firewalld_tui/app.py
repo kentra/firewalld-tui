@@ -10,6 +10,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Header,
     Input,
@@ -36,7 +37,7 @@ BINDINGS = [
     Binding("s", "add_source", "Add Source"),
     Binding("S", "remove_source", "Remove Source"),
     Binding("R", "add_rich_rule", "Add Rich Rule"),
-    Binding("delete", "remove_rich_rule", "Remove Rich Rule"),
+    Binding("delete", "remove_selected_row", "Remove Rule"),
     Binding("t", "toggle_mode", "Toggle Runtime/Permanent"),
     Binding("f1", "change_theme", "Change Theme"),
 ]
@@ -293,6 +294,24 @@ class FirewalldTUI(App):
         min-width: 20;
     }
 
+    #toolbar {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #toolbar Button {
+        margin-right: 1;
+    }
+
+    #toolbar Button:last-child {
+        margin-right: 0;
+    }
+
+    #rule-table {
+        height: 1fr;
+        margin-bottom: 1;
+    }
+
     .detail-row {
         height: auto;
         min-height: 1;
@@ -305,7 +324,10 @@ class FirewalldTUI(App):
     }
 
     #zone-details {
-        height: 1fr;
+        height: auto;
+        max-height: 40%;
+        border-top: solid $primary;
+        padding-top: 1;
     }
 
     #action-bar {
@@ -328,6 +350,8 @@ class FirewalldTUI(App):
     def __init__(self) -> None:
         super().__init__()
         self.zones: list[str] = []
+        self._rule_rows: list[firewall.RuleRow] = []
+        self._zone_info: firewall.ZoneInfo | None = None
         saved_theme = load_theme()
         try:
             self.theme = saved_theme
@@ -348,16 +372,27 @@ class FirewalldTUI(App):
             with Vertical(id="sidebar"):
                 yield Static("Zones", id="sidebar-title")
                 yield ListView(id="zone-list")
-            with VerticalScroll(id="main-content"):
+            with Vertical(id="main-content"):
                 yield Static("Select a zone", id="zone-header")
                 yield Static("Mode: Runtime", id="mode-indicator")
+                with Horizontal(id="toolbar"):
+                    yield Button("Add Service", id="tb-add-service", variant="primary")
+                    yield Button("Add Port", id="tb-add-port", variant="primary")
+                    yield Button("Add Source", id="tb-add-source", variant="primary")
+                    yield Button("Add Rich Rule", id="tb-add-rich", variant="primary")
+                yield DataTable(
+                    id="rule-table", cursor_type="row", zebra_stripes=True
+                )
                 with VerticalScroll(id="zone-details"):
                     pass
         with Horizontal(id="action-bar"):
-            yield Static("q:Quit r:Refresh d:Default a:Addsvc x:Rmsvc p:Rmport P:Rmport i:Rmiface I:Rmiface s:Rmsrc S:Rmsrc R:Richrule del:Rmrichrule t:Toggle f1:Theme")
+            yield Static("q:Quit r:Refresh d:Default a:Addsvc x:Rmsvc p:Addport P:Rmport i:Addiface I:Rmiface s:Addsrc S:Rmsrc R:Richrule del:Rmrule t:Toggle f1:Theme")
         yield Footer()
 
     def on_mount(self) -> None:
+        table = self.query_one("#rule-table", DataTable)
+        for label in ("Source", "Destination", "Protocol", "Service/Port", "Action"):
+            table.add_column(label)
         self.load_zones()
 
     def load_zones(self) -> None:
@@ -395,85 +430,120 @@ class FirewalldTUI(App):
             self.current_zone = event.item.name
 
     def load_zone_details(self, zone: str) -> None:
-        """Load and display zone details."""
+        """Load zone info and rebuild the rules table."""
         try:
             info = firewall.list_zone(zone, self.permanent_mode)
-            details = self.query_one("#zone-details")
-            details.remove_children()
+            self._zone_info = info
+            rows = firewall.rule_rows_from_info(info)
+            self._rule_rows = rows
 
             self.query_one("#zone-header").update(f"Zone: {info.name}")
 
-            target = info.target if info.target else "(default)"
-            details.mount(
-                Static(f"{target}", classes="detail-row")
-            )
-
-            if info.services:
-                details.mount(
-                    Static("Services:", classes="detail-label")
+            table = self.query_one("#rule-table", DataTable)
+            cursor_row = table.cursor_row
+            table.clear()
+            for row in rows:
+                table.add_row(
+                    row.source,
+                    row.destination,
+                    row.protocol,
+                    row.service_port,
+                    row.action,
                 )
-                for svc in info.services:
-                    details.mount(Static(f"  {svc}", classes="detail-row"))
-
-            if info.ports:
-                details.mount(
-                    Static("Ports:", classes="detail-label")
+            if rows:
+                table.move_cursor(
+                    row=min(max(cursor_row, 0), len(rows) - 1),
+                    column=0,
+                    animate=False,
                 )
-                for port in info.ports:
-                    details.mount(Static(f"  {port}", classes="detail-row"))
 
-            if info.protocols:
-                details.mount(
-                    Static("Protocols:", classes="detail-label")
-                )
-                for proto in info.protocols:
-                    details.mount(Static(f"  {proto}", classes="detail-row"))
-
-            if info.interfaces:
-                details.mount(
-                    Static("Interfaces:", classes="detail-label")
-                )
-                for iface in info.interfaces:
-                    details.mount(Static(f"  {iface}", classes="detail-row"))
-
-            if info.sources:
-                details.mount(
-                    Static("Sources:", classes="detail-label")
-                )
-                for src in info.sources:
-                    details.mount(Static(f"  {src}", classes="detail-row"))
-
-            if info.source_ports:
-                details.mount(
-                    Static("Source Ports:", classes="detail-label")
-                )
-                for sp in info.source_ports:
-                    details.mount(Static(f"  {sp}", classes="detail-row"))
-
-            if info.forward_ports:
-                details.mount(
-                    Static("Forward Ports:", classes="detail-label")
-                )
-                for fp in info.forward_ports:
-                    details.mount(Static(f"  {fp}", classes="detail-row"))
-
-            if info.icmp_blocks:
-                details.mount(
-                    Static("ICMP Blocks:", classes="detail-label")
-                )
-                for icmp in info.icmp_blocks:
-                    details.mount(Static(f"  {icmp}", classes="detail-row"))
-
-            if info.rich_rules:
-                details.mount(
-                    Static("Rich Rules:", classes="detail-label")
-                )
-                for rule in info.rich_rules:
-                    details.mount(Static(f"  {rule}", classes="detail-row"))
+            selected: firewall.RuleRow | None = None
+            idx = table.cursor_row
+            if rows and 0 <= idx < len(rows):
+                selected = rows[idx]
+            self._render_details_panel(selected)
 
         except RuntimeError as e:
             logger.error("Error loading zone details: {}", e)
             self.notify(f"Error loading zone details: {e}", severity="error")
+
+    def _render_details_panel(
+        self, selected: firewall.RuleRow | None
+    ) -> None:
+        """Render the lower panel: selected row detail + zone meta."""
+        panel = self.query_one("#zone-details")
+        panel.remove_children()
+        info = self._zone_info
+        if info is None:
+            return
+
+        if selected is not None:
+            panel.mount(
+                Static(f"Selected ({selected.kind}):", classes="detail-label")
+            )
+            panel.mount(Static(selected.detail, classes="detail-row"))
+
+        panel.mount(Static("Zone:", classes="detail-label"))
+        target = info.target if info.target else "(default)"
+        panel.mount(Static(f"  target: {target}", classes="detail-row"))
+        if info.interfaces:
+            panel.mount(
+                Static(
+                    f"  interfaces: {', '.join(info.interfaces)}",
+                    classes="detail-row",
+                )
+            )
+        if info.protocols:
+            panel.mount(
+                Static(
+                    f"  protocols: {', '.join(info.protocols)}",
+                    classes="detail-row",
+                )
+            )
+        if info.source_ports:
+            panel.mount(
+                Static(
+                    f"  source ports: {', '.join(info.source_ports)}",
+                    classes="detail-row",
+                )
+            )
+        if info.forward_ports:
+            panel.mount(
+                Static(
+                    f"  forward ports: {', '.join(info.forward_ports)}",
+                    classes="detail-row",
+                )
+            )
+        if info.icmp_blocks:
+            panel.mount(
+                Static(
+                    f"  icmp blocks: {', '.join(info.icmp_blocks)}",
+                    classes="detail-row",
+                )
+            )
+
+    @on(DataTable.RowHighlighted)
+    def on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Show the highlighted rule's detail in the lower panel."""
+        if event.data_table.id != "rule-table":
+            return
+        idx = event.cursor_row
+        selected = (
+            self._rule_rows[idx] if 0 <= idx < len(self._rule_rows) else None
+        )
+        self._render_details_panel(selected)
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Route toolbar button presses to their actions."""
+        action = {
+            "tb-add-service": self.action_add_service,
+            "tb-add-port": self.action_add_port,
+            "tb-add-source": self.action_add_source,
+            "tb-add-rich": self.action_add_rich_rule,
+        }.get(event.button.id or "")
+        if action:
+            action()
 
     def action_refresh(self) -> None:
         """Refresh zones and details."""
@@ -734,37 +804,36 @@ class FirewalldTUI(App):
                 logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
-    def action_remove_rich_rule(self) -> None:
-        """Remove a rich rule from the current zone."""
+    def action_remove_selected_row(self) -> None:
+        """Remove the firewall object behind the selected table row."""
         if not self.current_zone:
             self.notify("No zone selected", severity="warning")
             return
+        table = self.query_one("#rule-table", DataTable)
+        idx = table.cursor_row
+        if not (0 <= idx < len(self._rule_rows)):
+            self.notify("No rule selected", severity="warning")
+            return
+        row = self._rule_rows[idx]
+        removers = {
+            "service": firewall.remove_service,
+            "port": firewall.remove_port,
+            "source": firewall.remove_source,
+            "rich": firewall.remove_rich_rule,
+        }
+        remover = removers[row.kind]
         try:
-            rules = firewall.list_rich_rules(self.current_zone, self.permanent_mode)
-            if not rules:
-                self.notify("No rich rules to remove", severity="warning")
-                return
-            # Use a list screen for rules
-            self.push_screen(
-                ZoneSelectScreen(rules, "Select rich rule to remove:"),
-                self._handle_remove_rich_rule,
-            )
+            if remover(row.ref, self.current_zone, self.permanent_mode):
+                logger.info(
+                    "removed {} {} from {}", row.kind, row.ref, self.current_zone
+                )
+                self.notify(f"Removed {row.ref} from {self.current_zone}")
+                self.load_zone_details(self.current_zone)
+            else:
+                self.notify(f"Failed to remove {row.ref}", severity="error")
         except RuntimeError as e:
             logger.error("{}", e)
             self.notify(str(e), severity="error")
-
-    def _handle_remove_rich_rule(self, rule: str | None) -> None:
-        if rule and self.current_zone:
-            try:
-                if firewall.remove_rich_rule(rule, self.current_zone, self.permanent_mode):
-                    logger.info("removed rich rule from {}", self.current_zone)
-                    self.notify(f"Removed rich rule from {self.current_zone}")
-                    self.load_zone_details(self.current_zone)
-                else:
-                    self.notify("Failed to remove rich rule", severity="error")
-            except RuntimeError as e:
-                logger.error("{}", e)
-                self.notify(str(e), severity="error")
 
 
 def main() -> None:
