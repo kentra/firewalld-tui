@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Daniel Kolstad", email = "admin@kenra.org" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "textual>=8.2.8",
 ]

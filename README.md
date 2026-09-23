@@ -4,7 +4,7 @@ A terminal user interface for managing firewalld, built with [Textual](https://g
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.12+
 - `firewalld` installed and running
 - `firewall-cmd` available in PATH
 

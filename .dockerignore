@@ -1,0 +1,10 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+*.egg-info/
+.opencode/
+.python-version
+uv.lock

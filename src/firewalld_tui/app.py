@@ -86,11 +86,12 @@ class InputModal(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="input-container"):
             yield Static(self.title_text, id="input-label")
-            yield Input(placeholder=self.placeholder, id="input-field")
+            yield Input(
+                placeholder=self.placeholder, value=self.default, id="input-field"
+            )
             with Horizontal(classes="buttons"):
                 yield Button("OK", id="ok", variant="primary")
                 yield Button("Cancel", id="cancel", variant="error")
-                self.query_one("#input-field", Input).value = self.default
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -181,14 +182,13 @@ class ServiceSelectScreen(ModalScreen[str | None]):
             yield Static("Select a service:")
             with ListView(id="service-list"):
                 for svc in self.services:
-                    yield ListItem(Label(svc))
+                    yield ListItem(Label(svc), name=svc)
             yield Button("Cancel", id="cancel", variant="error")
 
     @on(ListView.Selected)
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if isinstance(event.item, ListItem):
-            label = event.item.query_one(Label)
-            self.dismiss(label.renderable if hasattr(label, "renderable") else str(label))
+        if isinstance(event.item, ListItem) and event.item.name:
+            self.dismiss(event.item.name)
 
     @on(Button.Pressed)
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -212,7 +212,7 @@ class ZoneSelectScreen(ModalScreen[str | None]):
         padding: 1;
     }
 
-    #zone-list {
+    #select-list {
         height: 1fr;
         margin: 1 0;
     }
@@ -226,16 +226,15 @@ class ZoneSelectScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="zone-container"):
             yield Static(self.title_text)
-            with ListView(id="zone-list"):
+            with ListView(id="select-list"):
                 for zone in self.zones:
-                    yield ListItem(Label(zone))
+                    yield ListItem(Label(zone), name=zone)
             yield Button("Cancel", id="cancel", variant="error")
 
     @on(ListView.Selected)
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if isinstance(event.item, ListItem):
-            label = event.item.query_one(Label)
-            self.dismiss(str(label))
+        if isinstance(event.item, ListItem) and event.item.name:
+            self.dismiss(event.item.name)
 
     @on(Button.Pressed)
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -353,9 +352,9 @@ class FirewalldTUI(App):
             list_view = self.query_one("#zone-list", ListView)
             list_view.clear()
             for zone in self.zones:
-                list_view.append(ListItem(Label(zone)))
-            if self.zones:
-                self.current_zone = self.zones[0]
+                list_view.append(ListItem(Label(zone), name=zone))
+            if self.current_zone not in self.zones:
+                self.current_zone = self.zones[0] if self.zones else None
         except RuntimeError as e:
             self.notify(f"Error loading zones: {e}", severity="error")
 
@@ -374,9 +373,10 @@ class FirewalldTUI(App):
     @on(ListView.Selected)
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle zone selection."""
-        if isinstance(event.item, ListItem):
-            label = event.item.query_one(Label)
-            self.current_zone = str(label)
+        if event.list_view.id != "zone-list" or event.list_view.screen is not self.screen:
+            return
+        if isinstance(event.item, ListItem) and event.item.name:
+            self.current_zone = event.item.name
 
     def load_zone_details(self, zone: str) -> None:
         """Load and display zone details."""

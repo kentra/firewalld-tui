@@ -1,0 +1,13 @@
+services:
+  firewalld:
+    build: .
+    container_name: firewalld-tui-test
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - firewalld-config:/etc/firewalld
+    stdin_open: true
+    tty: true
+
+volumes:
+  firewalld-config:
