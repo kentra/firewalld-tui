@@ -385,7 +385,7 @@ class FirewalldTUI(App):
             details = self.query_one("#zone-details")
             details.remove_children()
 
-            details.mount(Static(f"Zone: {info.name}", id="zone-header"))
+            self.query_one("#zone-header").update(f"Zone: {info.name}")
 
             target = info.target if info.target else "(default)"
             details.mount(
