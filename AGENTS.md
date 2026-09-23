@@ -13,9 +13,12 @@ uv run firewalld-tui # Run the TUI (needs firewall-cmd in PATH)
 
 ```
 src/firewalld_tui/
-├── app.py        # Textual TUI app (main UI, screens, modals incl. AddPolicyModal)
+├── app.py        # Textual TUI app (header tabs + 4 panes + workers)
 ├── firewall.py   # Subprocess wrapper for firewall-cmd commands
-├── config.py     # loguru setup + policies.json store; ~/.firewalld-tui/firewalld-tui.conf
+├── config.py     # loguru setup + policies.json store + [dashboard]/[monitor] sections
+├── db.py         # SQLAlchemy sqlite store (traffic.db: TrafficLog/ZoneTraffic/SystemSnapshot)
+├── filtering.py  # PAN-OS filter syntax -> SQLAlchemy WHERE (lark)
+├── journal.py    # Kernel nft-log tail thread -> TrafficLog (never raises)
 ├── themes.py     # panos-dark / panos-light Textual Theme objects
 └── __init__.py   # Entry point, exports main(); calls setup_logging()
 scripts/
@@ -65,6 +68,10 @@ No linter or formatter is configured.
 - `#rule-table` rows are parallel to `app._policy_rows` (both rebuilt in `load_zone_details`, now including disabled rows); the Delete key opens a `ConfirmModal` then removes the selected row's firewall object via `action_delete_policy`/`_do_delete_policy` — keep them in sync
 - Enter on the table opens Edit via `App.on_key` (focus-scoped, modals excluded) — don't use `DataTable.RowSelected` for this, it also fires on click
 - `Select(value=...)` must match an option; `AddPolicyModal` falls back to `"any"` for unknown initial values
+- Header tabs: `active_tab` reactive drives `#tab-dashboard/#tab-monitor/#tab-policies/#tab-settings` display + `htab-*` button variants; Policies pane keeps all legacy IDs (`#zone-header`, `#rule-table`, …) so smoke checks stay green
+- DB access must never run on the UI thread — use `asyncio.to_thread` / `@work`; sqlite WAL + `check_same_thread=False` is set in `db.get_engine`
+- Monitor filtering: `filtering.parse_filter` raises `FilterError` on bad syntax (keep old rows, show status); CIDR `in` works via the `in_cidr` SQLite function registered in `db.py`
+- `journal.tail_logs` runs in a daemon thread and never raises; empty Monitor in Docker is expected until real traffic is logged
 - Textual 8 gotchas: `str(widget)` returns `"Label()"` not the text (use `ListItem(..., name=value)` / `event.item.name`); `ListView` uses `.index` not `.highlighted`; widget content is `.content` not `.renderable`
 - Don't call `query_one()` inside `compose()` — widgets aren't mounted yet; pass values via `Input(value=...)` instead
 

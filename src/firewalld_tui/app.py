@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
+import threading
 
 from textual import on
 from textual.app import App, ComposeResult, InvalidThemeError
@@ -29,16 +31,24 @@ from textual.widgets import (
 from loguru import logger
 from rich.text import Text
 
-from . import firewall
+from . import db, firewall, journal
 from .config import (
     CONFIG_FILE,
     delete_policy as delete_policy_entry,
     is_policy_disabled,
+    load_config,
+    load_dashboard_settings,
+    load_monitor_settings,
     load_policies,
     load_theme,
+    reconfigure_logging,
+    save_dashboard_settings,
+    save_logging_settings,
+    save_monitor_settings,
     save_policy as save_policy_entry,
     save_theme,
 )
+from .filtering import FilterError, parse_filter
 from .themes import PANOS_DARK_THEME, PANOS_LIGHT_THEME
 
 BINDINGS = [
@@ -55,6 +65,11 @@ BINDINGS = [
     Binding("I", "remove_interface", "Remove Interface"),
     Binding("t", "toggle_mode", "Toggle Runtime/Permanent"),
     Binding("f1", "change_theme", "Change Theme"),
+    Binding("1", "tab_dashboard", "Dashboard"),
+    Binding("2", "tab_monitor", "Monitor"),
+    Binding("3", "tab_policies", "Policies"),
+    Binding("4", "tab_settings", "Settings"),
+    Binding("/", "focus_filter", "Filter"),
 ]
 
 PORT_RE = re.compile(r"^\d+(-\d+)?/(tcp|udp|sctp|dccp)$")
@@ -458,6 +473,77 @@ class FirewalldTUI(App):
         height: 1fr;
     }
 
+    #header-tabs {
+        height: 2;
+        min-height: 2;
+        layout: horizontal;
+        align: left middle;
+        background: $panel;
+        border-bottom: solid $primary;
+        padding: 0 1;
+    }
+
+    #header-tabs Button {
+        width: auto;
+        min-width: 12;
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        margin: 0 1;
+        border: none;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    .tab-pane {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #tab-dashboard, #tab-monitor, #tab-settings {
+        display: none;
+    }
+
+    #log-filter {
+        margin-bottom: 1;
+    }
+
+    #traffic-table {
+        height: 1fr;
+        margin-bottom: 1;
+    }
+
+    #filter-status {
+        text-align: center;
+        color: $text-muted;
+    }
+
+    #dash-policies, #dash-talkers {
+        height: auto;
+        max-height: 30%;
+        margin-bottom: 1;
+    }
+
+    #settings-form {
+        height: 1fr;
+    }
+
+    .sett-label {
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    .sett-buttons {
+        layout: horizontal;
+        height: 3;
+        align: center middle;
+        margin-top: 1;
+    }
+
+    .sett-buttons Button {
+        margin: 0 1;
+    }
+
     #sidebar {
         width: 25;
         height: 100%;
@@ -550,12 +636,19 @@ class FirewalldTUI(App):
 
     current_zone: reactive[str | None] = reactive(None)
     permanent_mode: reactive[bool] = reactive(False)
+    active_tab: reactive[str] = reactive("policies")
+
+    TAB_NAMES = ("dashboard", "monitor", "policies", "settings")
 
     def __init__(self) -> None:
         super().__init__()
         self.zones: list[str] = []
         self._policy_rows: list[firewall.PolicyRow] = []
         self._zone_info: firewall.ZoneInfo | None = None
+        self._traffic_rows: list[db.TrafficLog] = []
+        self._filter_timer = None
+        self._log_stop = threading.Event()
+        self._log_thread: threading.Thread | None = None
         saved_theme = load_theme()
         try:
             self.theme = saved_theme
@@ -572,18 +665,77 @@ class FirewalldTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="header-tabs"):
+            yield Button("Dashboard", id="htab-dashboard", compact=True)
+            yield Button("Monitor", id="htab-monitor", compact=True)
+            yield Button(
+                "Policies", id="htab-policies", compact=True, variant="primary"
+            )
+            yield Button("Settings", id="htab-settings", compact=True)
         with Horizontal(id="body"):
-            with Vertical(id="sidebar"):
-                yield Static("Zones", id="sidebar-title")
-                yield ListView(id="zone-list")
-            with Vertical(id="main-content"):
-                yield Static("Select a zone", id="zone-header")
-                yield Static("Mode: Runtime", id="mode-indicator")
+            with Vertical(id="tab-dashboard", classes="tab-pane"):
+                yield Static("System", classes="detail-label")
+                yield Static("loading…", id="dash-system")
+                yield Static("Firewall", classes="detail-label")
+                yield Static("loading…", id="dash-fw")
+                yield Static("Top Policies (7d hits)", classes="detail-label")
                 yield DataTable(
-                    id="rule-table", cursor_type="row", zebra_stripes=True
+                    id="dash-policies", cursor_type="row", zebra_stripes=True
                 )
-                with VerticalScroll(id="zone-details"):
-                    pass
+                yield Static("Top Talkers (7d hits)", classes="detail-label")
+                yield DataTable(
+                    id="dash-talkers", cursor_type="row", zebra_stripes=True
+                )
+            with Vertical(id="tab-monitor", classes="tab-pane"):
+                yield Input(
+                    placeholder="(addr.src in 10.0.0.0/24) and (action eq allow)  •  Press / to filter",
+                    id="log-filter",
+                )
+                yield DataTable(
+                    id="traffic-table", cursor_type="row", zebra_stripes=True
+                )
+                yield Static("No filter", id="filter-status")
+            with Horizontal(id="tab-policies", classes="tab-pane"):
+                with Vertical(id="sidebar"):
+                    yield Static("Zones", id="sidebar-title")
+                    yield ListView(id="zone-list")
+                with Vertical(id="main-content"):
+                    yield Static("Select a zone", id="zone-header")
+                    yield Static("Mode: Runtime", id="mode-indicator")
+                    yield DataTable(
+                        id="rule-table", cursor_type="row", zebra_stripes=True
+                    )
+                    with VerticalScroll(id="zone-details"):
+                        pass
+            with Vertical(id="tab-settings", classes="tab-pane"):
+                with VerticalScroll(id="settings-form"):
+                    yield Static("Logging", classes="detail-label")
+                    yield Static("Level", classes="sett-label")
+                    yield Select(
+                        [
+                            ("DEBUG", "DEBUG"),
+                            ("INFO", "INFO"),
+                            ("WARNING", "WARNING"),
+                            ("ERROR", "ERROR"),
+                        ],
+                        id="sett-log-level",
+                    )
+                    yield Static("Rotation", classes="sett-label")
+                    yield Input(id="sett-log-rotation")
+                    yield Static("Retention", classes="sett-label")
+                    yield Input(id="sett-log-retention")
+                    yield Static("Interface", classes="detail-label")
+                    yield Static("Theme", classes="sett-label")
+                    yield Input(id="sett-theme")
+                    yield Static("Dashboard", classes="detail-label")
+                    yield Static("Poll interval (seconds)", classes="sett-label")
+                    yield Input(id="sett-poll")
+                    yield Static("Monitor", classes="detail-label")
+                    yield Static("Max rows per query", classes="sett-label")
+                    yield Input(id="sett-rows")
+                    with Horizontal(classes="sett-buttons"):
+                        yield Button("Save", id="sett-save", variant="primary")
+                        yield Button("Reset", id="sett-reset", variant="error")
         with Horizontal(id="action-bar"):
             yield Button("+ Add", id="tb-add-policy", variant="primary", compact=True)
             yield Button(
@@ -611,7 +763,76 @@ class FirewalldTUI(App):
             "Action",
         ):
             table.add_column(label)
+        traffic = self.query_one("#traffic-table", DataTable)
+        for label in (
+            "Receive Time",
+            "Type",
+            "From Zone",
+            "To Zone",
+            "Source",
+            "Destination",
+            "Application",
+            "Service",
+            "Action",
+            "Rule",
+            "Bytes",
+        ):
+            traffic.add_column(label)
+        dash_policies = self.query_one("#dash-policies", DataTable)
+        for label in ("Policy", "Hits"):
+            dash_policies.add_column(label)
+        dash_talkers = self.query_one("#dash-talkers", DataTable)
+        for label in ("Source", "Hits"):
+            dash_talkers.add_column(label)
+        self._load_settings_form()
+        db.init_db()
+        journal.ensure_log_denied()
+        self._log_thread = threading.Thread(
+            target=journal.tail_logs, args=(self._log_stop,), daemon=True
+        )
+        self._log_thread.start()
+        self._schedule_dashboard()
         self.load_zones()
+
+    def on_unmount(self) -> None:
+        """Stop the background kernel-log tail thread."""
+        self._log_stop.set()
+        if self._log_thread is not None:
+            self._log_thread.join(timeout=2)
+
+    def watch_active_tab(self, tab: str) -> None:
+        """Show one pane, highlight its header button, refresh on entry."""
+        for name in self.TAB_NAMES:
+            self.query_one(f"#tab-{name}").display = name == tab
+            self.query_one(f"#htab-{name}", Button).variant = (
+                "primary" if name == tab else "default"
+            )
+        if tab == "monitor":
+            self.run_worker(self._refresh_monitor(), exclusive=True)
+        elif tab == "dashboard":
+            self.run_worker(self._refresh_dashboard(), exclusive=True)
+
+    def _set_tab(self, tab: str) -> None:
+        if tab in self.TAB_NAMES:
+            self.active_tab = tab
+
+    def action_tab_dashboard(self) -> None:
+        self._set_tab("dashboard")
+
+    def action_tab_monitor(self) -> None:
+        self._set_tab("monitor")
+
+    def action_tab_policies(self) -> None:
+        self._set_tab("policies")
+
+    def action_tab_settings(self) -> None:
+        self._load_settings_form()
+        self._set_tab("settings")
+
+    def action_focus_filter(self) -> None:
+        """Jump to the Monitor tab and focus the PAN-OS filter bar."""
+        self._set_tab("monitor")
+        self.query_one("#log-filter", Input).focus()
 
     def load_zones(self) -> None:
         """Load all zones and display them."""
@@ -832,16 +1053,286 @@ class FirewalldTUI(App):
 
     @on(Button.Pressed)
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Route bottom toolbar button presses to their actions."""
+        """Route toolbar, header-tab and settings button presses."""
         action = {
             "tb-add-policy": self.action_add_policy,
             "tb-del-policy": self.action_delete_policy,
             "tb-clone-policy": self.action_clone_policy,
             "tb-edit-policy": self.action_edit_policy,
             "tb-toggle-policy": self.action_toggle_policy,
+            "htab-dashboard": self.action_tab_dashboard,
+            "htab-monitor": self.action_tab_monitor,
+            "htab-policies": self.action_tab_policies,
+            "htab-settings": self.action_tab_settings,
+            "sett-save": self.action_save_settings,
+            "sett-reset": self.action_reset_settings,
         }.get(event.button.id or "")
         if action:
             action()
+
+    def _monitor_limit(self) -> int:
+        try:
+            return max(50, min(5000, int(load_monitor_settings()["max_rows"])))
+        except (ValueError, KeyError):
+            return 500
+
+    async def _refresh_monitor(self, filter_text: str | None = None) -> None:
+        """Run the PAN-OS filter query off-thread and rebuild the table."""
+        if filter_text is None:
+            try:
+                filter_text = self.query_one("#log-filter", Input).value
+            except Exception:
+                filter_text = ""
+        try:
+            clauses = await asyncio.to_thread(parse_filter, filter_text or "")
+        except FilterError as e:
+            self.query_one("#filter-status", Static).update(f"Filter error: {e}")
+            self.notify(f"Invalid filter: {e}", severity="error")
+            return
+        limit = self._monitor_limit()
+        rows, total = await asyncio.to_thread(self._query_monitor, clauses, limit)
+        self._traffic_rows = rows
+        table = self.query_one("#traffic-table", DataTable)
+        table.clear()
+        for row in rows:
+            table.add_row(
+                row.receive_time.strftime("%Y/%m/%d %H:%M:%S")
+                if row.receive_time
+                else "",
+                row.type,
+                row.src_zone,
+                row.dst_zone,
+                row.src_ip,
+                row.dst_ip,
+                row.app,
+                row.service,
+                row.action,
+                row.rule,
+                str(row.bytes) if row.bytes is not None else "",
+            )
+        self.query_one("#filter-status", Static).update(
+            f"Filter: OK | showing {len(rows)} of {total} rows"
+        )
+
+    @staticmethod
+    def _query_monitor(clauses: list, limit: int):
+        rows = db.query_logs(clauses, limit)
+        total = db.count_logs()
+        return rows, total
+
+    def _schedule_monitor_query(self) -> None:
+        """Debounce keystroke queries so typing never hammers sqlite."""
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+        self._filter_timer = self.set_timer(0.4, lambda: self._run_monitor_now())
+
+    def _run_monitor_now(self) -> None:
+        self.run_worker(self._refresh_monitor(), exclusive=True)
+
+    @on(Input.Changed, "#log-filter")
+    def on_filter_changed(self, event: Input.Changed) -> None:
+        if event.input.screen is not self.screen:
+            return
+        self._schedule_monitor_query()
+
+    @on(Input.Submitted, "#log-filter")
+    def on_filter_submitted(self, event: Input.Submitted) -> None:
+        self._run_monitor_now()
+
+    def _dashboard_poll_seconds(self) -> float:
+        try:
+            return max(1.0, min(300.0, float(load_dashboard_settings()["poll_interval"])))
+        except (ValueError, KeyError):
+            return 5.0
+
+    def _schedule_dashboard(self) -> None:
+        """Self-rescheduling sampler so Settings poll_interval applies live."""
+        self.set_timer(self._dashboard_poll_seconds(), self._dashboard_tick)
+
+    async def _dashboard_tick(self) -> None:
+        await asyncio.to_thread(self._sample_metrics)
+        if self.active_tab == "dashboard":
+            await self._refresh_dashboard()
+        self._schedule_dashboard()
+
+    @staticmethod
+    def _sample_metrics() -> None:
+        """Sample system + interface counters into sqlite (worker thread)."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        sample = db.sample_system()
+        netdev = db.sample_netdev()
+        conntrack = db.sample_conntrack()
+        iface_zones: dict[str, str] = {}
+        try:
+            for zone, bindings in firewall.get_active_zones().items():
+                for entry in bindings:
+                    if ":" in entry:
+                        kind, _, value = entry.partition(":")
+                        if kind.strip() == "interfaces":
+                            for iface in value.split():
+                                iface_zones[iface.strip()] = zone
+        except RuntimeError:
+            pass
+        try:
+            with db.session_scope() as s:
+                s.add(db.SystemSnapshot(cpu_load1=sample["cpu_load1"], mem_used_pct=sample["mem_used_pct"], disk_used_pct=sample["disk_used_pct"], ts=now))
+                for iface, counters in netdev.items():
+                    s.add(
+                        db.ZoneTraffic(
+                            zone=iface_zones.get(iface, iface),
+                            rx_bytes=counters["rx_bytes"],
+                            tx_bytes=counters["tx_bytes"],
+                            conntrack=conntrack,
+                            ts=now,
+                        )
+                    )
+            db.prune_old_rows()
+        except Exception as e:
+            logger.warning("metrics sample failed: {}", e)
+
+    async def _refresh_dashboard(self) -> None:
+        """Rebuild dashboard widgets from sqlite (UI thread safe)."""
+        data = await asyncio.to_thread(self._collect_dashboard)
+        self.query_one("#dash-system", Static).update(
+            f"CPU load(1m): {data['cpu_load1']:.2f}   "
+            f"Memory: {data['mem_used_pct']:.1f}%   "
+            f"Disk: {data['disk_used_pct']:.1f}%"
+        )
+        self.query_one("#dash-fw", Static).update(
+            f"firewalld {data['fw_version']} ({data['fw_state']})   "
+            f"default zone: {data['default_zone']}   "
+            f"policies: {data['policy_count']}   "
+            f"RX: {data['rx_bytes']} / TX: {data['tx_bytes']}   "
+            f"conntrack: {data['conntrack']}"
+        )
+        policies_table = self.query_one("#dash-policies", DataTable)
+        policies_table.clear()
+        for name, hits in data["top_policies"]:
+            policies_table.add_row(name, str(hits))
+        talkers_table = self.query_one("#dash-talkers", DataTable)
+        talkers_table.clear()
+        for ip, hits in data["top_talkers"]:
+            talkers_table.add_row(ip, str(hits))
+
+    @staticmethod
+    def _collect_dashboard() -> dict:
+        """Gather every dashboard number in one worker-thread pass."""
+        with db.session_scope() as s:
+            snap = (
+                s.query(db.SystemSnapshot)
+                .order_by(db.SystemSnapshot.ts.desc())
+                .first()
+            )
+            latest_net = (
+                s.query(db.ZoneTraffic)
+                .order_by(db.ZoneTraffic.ts.desc())
+                .limit(50)
+                .all()
+            )
+        rx = sum(r.rx_bytes for r in latest_net)
+        tx = sum(r.tx_bytes for r in latest_net)
+        conntrack = latest_net[0].conntrack if latest_net else None
+        try:
+            fw_version = firewall.get_version()
+        except RuntimeError:
+            fw_version = "unknown"
+        try:
+            fw_state = "running" if firewall.is_active() else "stopped"
+        except RuntimeError:
+            fw_state = "unknown"
+        try:
+            default_zone = firewall.get_default_zone()
+        except RuntimeError:
+            default_zone = "unknown"
+        try:
+            policy_count = len(firewall.policy_rows_from_info(firewall.list_zone()))
+        except RuntimeError:
+            policy_count = 0
+        return {
+            "cpu_load1": snap.cpu_load1 if snap else 0.0,
+            "mem_used_pct": snap.mem_used_pct if snap else 0.0,
+            "disk_used_pct": snap.disk_used_pct if snap else 0.0,
+            "fw_version": fw_version,
+            "fw_state": fw_state,
+            "default_zone": default_zone,
+            "policy_count": policy_count,
+            "rx_bytes": rx,
+            "tx_bytes": tx,
+            "conntrack": conntrack if conntrack is not None else "n/a",
+            "top_policies": db.top_by_column(db.TrafficLog.rule),
+            "top_talkers": db.top_by_column(db.TrafficLog.src_ip),
+        }
+
+    def _load_settings_form(self) -> None:
+        """Fill the Settings tab from the conf file."""
+        try:
+            logging_values, _ = load_config()
+        except Exception:
+            logging_values = {}
+        self.query_one("#sett-log-level", Select).value = logging_values.get(
+            "level", "INFO"
+        )
+        self.query_one("#sett-log-rotation", Input).value = logging_values.get(
+            "rotation", "10 MB"
+        )
+        self.query_one("#sett-log-retention", Input).value = logging_values.get(
+            "retention", "7 days"
+        )
+        self.query_one("#sett-theme", Input).value = load_theme()
+        self.query_one("#sett-poll", Input).value = load_dashboard_settings()[
+            "poll_interval"
+        ]
+        self.query_one("#sett-rows", Input).value = load_monitor_settings()["max_rows"]
+
+    def action_save_settings(self) -> None:
+        """Validate and persist the Settings form (applies live)."""
+        level = self.query_one("#sett-log-level", Select).value
+        rotation = self.query_one("#sett-log-rotation", Input).value.strip()
+        retention = self.query_one("#sett-log-retention", Input).value.strip()
+        theme = self.query_one("#sett-theme", Input).value.strip()
+        poll = self.query_one("#sett-poll", Input).value.strip()
+        rows = self.query_one("#sett-rows", Input).value.strip()
+        if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            self.notify("Level must be DEBUG/INFO/WARNING/ERROR", severity="error")
+            return
+        if not rotation or not retention:
+            self.notify("Rotation and retention must not be empty", severity="error")
+            return
+        try:
+            poll_n = int(poll)
+            if not 1 <= poll_n <= 300:
+                raise ValueError
+        except ValueError:
+            self.notify("Poll interval must be 1-300 seconds", severity="error")
+            return
+        try:
+            rows_n = int(rows)
+            if not 50 <= rows_n <= 5000:
+                raise ValueError
+        except ValueError:
+            self.notify("Max rows must be 50-5000", severity="error")
+            return
+        save_logging_settings(
+            {"level": level, "rotation": rotation, "retention": retention}
+        )
+        reconfigure_logging()
+        save_dashboard_settings({"poll_interval": str(poll_n)})
+        save_monitor_settings({"max_rows": str(rows_n)})
+        if theme and theme != load_theme():
+            try:
+                self.theme = theme
+            except InvalidThemeError:
+                self.notify(f"Unknown theme {theme!r}", severity="error")
+                return
+        logger.info("settings saved via Settings tab")
+        self.notify("Settings saved")
+
+    def action_reset_settings(self) -> None:
+        """Discard edits by reloading the form from the conf file."""
+        self._load_settings_form()
+        self.notify("Settings reverted to saved values")
 
     def action_refresh(self) -> None:
         """Refresh zones and details."""
