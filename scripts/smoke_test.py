@@ -11,7 +11,7 @@ import asyncio
 import sys
 
 from textual.command import CommandPalette
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 from firewalld_tui import firewall
 from firewalld_tui.app import (
@@ -80,6 +80,56 @@ async def run() -> None:
         header = widget_text(app.query_one("#zone-header"))
         check(f"Zone: {app.current_zone}" in header, f"header shows current zone ({header!r})")
 
+        # --- rules table structure ---
+        print("rules table structure")
+        table = app.query_one("#rule-table", DataTable)
+        headers = [str(col.label) for col in table.columns.values()]
+        check(
+            headers == ["Source", "Destination", "Protocol", "Service/Port", "Action"],
+            f"table headers ({headers})",
+        )
+        check(
+            len(app._rule_rows) == table.row_count,
+            f"table row_count matches _rule_rows ({table.row_count} vs {len(app._rule_rows)})",
+        )
+        panel_text = "\n".join(
+            widget_text(w) for w in app.query_one("#zone-details").children
+        )
+        check("Zone:" in panel_text, "lower panel shows zone meta")
+        if app._rule_rows:
+            check(
+                app._rule_rows[0].detail in panel_text,
+                "lower panel shows selected row detail",
+            )
+        check(
+            firewall._target_action("%%REJECT%%") == "reject"
+            and firewall._target_action("%%DROP%%") == "drop"
+            and firewall._target_action("default") == "allow",
+            "block/drop/default zone targets map to actions",
+        )
+
+        # --- toolbar buttons open the same modals ---
+        print("toolbar buttons")
+        for btn_id, screen_type in (
+            ("tb-add-service", ServiceSelectScreen),
+            ("tb-add-port", InputModal),
+            ("tb-add-source", InputModal),
+            ("tb-add-rich", InputModal),
+        ):
+            await pilot.click(f"#{btn_id}")
+            await pilot.pause()
+            check(
+                isinstance(app.screen, screen_type),
+                f"{btn_id} opens {screen_type.__name__}",
+            )
+            app.screen.query_one("#cancel", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, screen_type),
+                f"{btn_id} modal cancelled",
+            )
+
         # --- sidebar zone selection ---
         print("sidebar zone selection")
         target = "dmz" if "dmz" in app.zones else app.zones[1]
@@ -88,6 +138,17 @@ async def run() -> None:
         check(app.current_zone == target, f"selected zone is {target!r} (got {app.current_zone!r})")
         header = widget_text(app.query_one("#zone-header"))
         check(f"Zone: {target}" in header, f"header updated to {target} ({header!r})")
+        check(
+            table.row_count == len(app._rule_rows) and table.row_count >= 1,
+            f"dmz table populated ({table.row_count} rows)",
+        )
+        panel_text = "\n".join(
+            widget_text(w) for w in app.query_one("#zone-details").children
+        )
+        check(
+            app._rule_rows[0].detail in panel_text,
+            "lower panel shows selected row detail after zone switch",
+        )
 
         # --- d: set default zone ---
         print("set default zone (d)")
@@ -105,18 +166,46 @@ async def run() -> None:
 
         # --- a/x: add/remove service ---
         print("add/remove service (a/x)")
+        all_services = firewall.get_services()
         zone_services = firewall.list_services(target)
-        svc = next(s for s in sorted(firewall.get_services()) if s not in zone_services)
+        svc = "ssh"
+        if svc in zone_services:
+            # dmz ships with ssh; remove it first so the add flow is exercised
+            firewall.remove_service(svc, target)
+            zone_services = firewall.list_services(target)
+        if svc not in all_services:
+            svc = next(s for s in sorted(all_services) if s not in zone_services)
         await pilot.press("a")
         await pilot.pause()
         check(isinstance(app.screen, ServiceSelectScreen), "service select modal opened")
-        await pick(pilot, "service-list", sorted(firewall.get_services()).index(svc))
+        await pick(pilot, "service-list", sorted(all_services).index(svc))
         check(svc in firewall.list_services(target), f"service {svc} added to {target}")
+        svc_rows = [r for r in app._rule_rows if r.kind == "service" and r.ref == svc]
+        check(bool(svc_rows), f"service {svc} row present in table")
+        if svc == "ssh" and svc_rows:
+            check(
+                svc_rows[0].protocol == "tcp"
+                and svc_rows[0].service_port == "ssh (22)"
+                and svc_rows[0].action == "allow",
+                f"ssh row resolved ({svc_rows[0].protocol}|{svc_rows[0].service_port}|{svc_rows[0].action})",
+            )
+        if svc_rows:
+            panel_text = "\n".join(
+                widget_text(w) for w in app.query_one("#zone-details").children
+            )
+            check(
+                svc_rows[0].detail in panel_text,
+                "lower panel tracks selected row after add",
+            )
         await pilot.press("x")
         await pilot.pause()
         zone_services = firewall.list_services(target)
         await pick(pilot, "service-list", sorted(zone_services).index(svc))
         check(svc not in firewall.list_services(target), f"service {svc} removed from {target}")
+        check(
+            not any(r.kind == "service" and r.ref == svc for r in app._rule_rows),
+            "service row removed from table",
+        )
 
         # --- cancel path: a then cancel ---
         print("service modal cancel path")
@@ -138,6 +227,14 @@ async def run() -> None:
         check(field.value == "", f"input prefilled empty (got {field.value!r})")
         await fill_input(pilot, "8080/tcp")
         check("8080/tcp" in firewall.list_ports(target), f"port 8080/tcp added to {target}")
+        port_rows = [r for r in app._rule_rows if r.kind == "port" and r.ref == "8080/tcp"]
+        check(
+            bool(port_rows)
+            and port_rows[0].protocol == "tcp"
+            and port_rows[0].service_port == "8080"
+            and port_rows[0].action == "allow",
+            f"port row in table ({port_rows[0] if port_rows else None})",
+        )
 
         # --- cancel path: p then cancel ---
         print("port modal cancel path")
@@ -155,6 +252,10 @@ async def run() -> None:
         check(isinstance(app.screen, InputModal), "input modal opened for remove port")
         await fill_input(pilot, "8080/tcp", submit=False)
         check("8080/tcp" not in firewall.list_ports(target), f"port 8080/tcp removed from {target}")
+        check(
+            not any(r.kind == "port" and r.ref == "8080/tcp" for r in app._rule_rows),
+            "port row removed from table",
+        )
 
         # --- i/I: add/remove interface ---
         print("add/remove interface (i/I)")
@@ -190,14 +291,26 @@ async def run() -> None:
         check(isinstance(app.screen, InputModal), "input modal opened for add source")
         await fill_input(pilot, source)
         check(source in firewall.list_sources(target), f"source {source} added to {target}")
+        src_rows = [r for r in app._rule_rows if r.kind == "source" and r.ref == source]
+        check(bool(src_rows), "source row present in table")
+        if src_rows:
+            expected = firewall._target_action(firewall.list_zone(target).target)
+            check(
+                src_rows[0].action == expected,
+                f"source row action matches zone target ({src_rows[0].action} vs {expected})",
+            )
         await pilot.press("S")
         await pilot.pause()
         check(isinstance(app.screen, ZoneSelectScreen), "source select modal opened")
         await pick(pilot, "select-list", sorted(firewall.list_sources(target)).index(source))
         check(source not in firewall.list_sources(target), f"source {source} removed from {target}")
+        check(
+            not any(r.kind == "source" and r.ref == source for r in app._rule_rows),
+            "source row removed from table",
+        )
 
-        # --- R/delete: add/remove rich rule ---
-        print("add/remove rich rule (R/delete)")
+        # --- R/delete: add rule, delete its table row ---
+        print("add/remove rich rule (R + delete key)")
         rule = "rule family='ipv4' source address='10.9.9.9' drop"
         await pilot.press("R")
         await pilot.pause()
@@ -206,12 +319,43 @@ async def run() -> None:
         # firewalld normalizes quotes ('ipv4' -> "ipv4"), so match on the address
         stored = [r for r in firewall.list_rich_rules(target) if "10.9.9.9" in r]
         check(bool(stored), "rich rule added")
-        await pilot.press("delete")
-        await pilot.pause()
-        check(isinstance(app.screen, ZoneSelectScreen), "rich rule select modal opened")
-        if stored:
-            await pick(pilot, "select-list", sorted(firewall.list_rich_rules(target)).index(stored[0]))
-        check(not [r for r in firewall.list_rich_rules(target) if "10.9.9.9" in r], "rich rule removed")
+        rich_idx = next(
+            (
+                i
+                for i, r in enumerate(app._rule_rows)
+                if r.kind == "rich" and "10.9.9.9" in r.ref
+            ),
+            None,
+        )
+        check(rich_idx is not None, "rich rule row present in table")
+        if rich_idx is not None:
+            rr = app._rule_rows[rich_idx]
+            check(
+                rr.source == "10.9.9.9" and rr.action == "drop",
+                f"rich rule row parsed ({rr.source}|{rr.action})",
+            )
+            table = app.query_one("#rule-table", DataTable)
+            table.focus()
+            await pilot.pause()
+            table.move_cursor(row=rich_idx, animate=False)
+            await pilot.pause()
+            await pilot.press("delete")
+            await pilot.pause()
+            check(
+                not isinstance(app.screen, ZoneSelectScreen),
+                "delete removes the selected row directly (no modal)",
+            )
+            check(
+                not [r for r in firewall.list_rich_rules(target) if "10.9.9.9" in r],
+                "rich rule removed",
+            )
+            check(
+                not any(
+                    r.kind == "rich" and "10.9.9.9" in r.ref
+                    for r in app._rule_rows
+                ),
+                "rich rule row removed from table",
+            )
 
         # --- t: toggle runtime/permanent ---
         print("toggle mode (t)")
