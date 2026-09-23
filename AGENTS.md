@@ -13,18 +13,22 @@ uv run firewalld-tui # Run the TUI (needs firewall-cmd in PATH)
 
 ```
 src/firewalld_tui/
-├── app.py        # Textual TUI app (main UI, screens, modals)
+├── app.py        # Textual TUI app (main UI, screens, modals incl. AddPolicyModal)
 ├── firewall.py   # Subprocess wrapper for firewall-cmd commands
-├── config.py     # loguru setup; ~/.firewalld-tui/firewalld-tui.conf
+├── config.py     # loguru setup + policies.json store; ~/.firewalld-tui/firewalld-tui.conf
+├── themes.py     # panos-dark / panos-light Textual Theme objects
 └── __init__.py   # Entry point, exports main(); calls setup_logging()
 scripts/
 ├── docker-start.sh  # Container entrypoint (dbus + firewalld)
 └── smoke_test.py    # Pilot-based e2e test of all TUI bindings
 ```
 
-- `firewall.py` calls `firewall-cmd` via subprocess, not D-Bus; `rule_rows_from_info()` synthesizes table rows (rich rules → services → ports → sources), resolving service protocols/ports from `/usr/lib/firewalld/services/*.xml`
-- `app.py` contains all Textual widgets, screens, and keyboard bindings
-- No test suite exists yet
+- `firewall.py` calls `firewall-cmd` via subprocess, not D-Bus; `policy_rows_from_info()` synthesizes table rows (rich rules → services → ports → sources), resolving service protocols/ports from `/usr/lib/firewalld/services/*.xml` (`RuleRow`/`rule_rows_from_info`/`build_rule_rows` are backwards-compat aliases)
+- `app.py` contains all Textual widgets, screens, and keyboard bindings; terminology is PAN-OS ("policies", not "rules"); bottom toolbar is `+ Add` / `- Delete` / `Clone` / `Edit` / `Disable|Enable` (`tb-add-policy`, `tb-del-policy`, `tb-clone-policy`, `tb-edit-policy`, `tb-toggle-policy`) — no top toolbar
+- Policy names + disabled state live in `~/.firewalld-tui/policies.json` keyed by firewalld ref (`config.load_policies`/`save_policy`/`set_policy_enabled`/`is_policy_disabled`/`delete_policy`); firewalld has no native named/disabled rules
+- `AddPolicyModal` is reused for Add/Clone/Edit via `initial` dict + `title`; `_apply_policy_result()` does the firewalld write (returns ref), callers handle notify/reload; edit is add-then-delete (delete skipped when ref unchanged)
+- Disabled policies are removed from firewalld but kept as dimmed rows (`rich.text.Text(style="dim")` — DataTable has no per-row disabled); merged in `load_zone_details` via `_disabled_rows_for_zone`, filtered by stored `zone` + `permanent` mode
+- No test suite exists yet (smoke_test.py is the e2e coverage)
 
 ## Docker Testing
 
@@ -58,7 +62,9 @@ No linter or formatter is configured.
 - `app.py` uses reactive properties (`current_zone`, `permanent_mode`) to drive UI updates
 - Widget IDs must be unique; mounting a duplicate ID causes Textual errors
 - The `#zone-header` widget is created in `compose()` and updated in-place via `.update()` — don't mount a new one
-- `#rule-table` rows are parallel to `app._rule_rows` (both rebuilt in `load_zone_details`); the Delete key removes the selected row's firewall object via `action_remove_selected_row` — keep them in sync
+- `#rule-table` rows are parallel to `app._policy_rows` (both rebuilt in `load_zone_details`, now including disabled rows); the Delete key opens a `ConfirmModal` then removes the selected row's firewall object via `action_delete_policy`/`_do_delete_policy` — keep them in sync
+- Enter on the table opens Edit via `App.on_key` (focus-scoped, modals excluded) — don't use `DataTable.RowSelected` for this, it also fires on click
+- `Select(value=...)` must match an option; `AddPolicyModal` falls back to `"any"` for unknown initial values
 - Textual 8 gotchas: `str(widget)` returns `"Label()"` not the text (use `ListItem(..., name=value)` / `event.item.name`); `ListView` uses `.index` not `.highlighted`; widget content is `.content` not `.renderable`
 - Don't call `query_one()` inside `compose()` — widgets aren't mounted yet; pass values via `Input(value=...)` instead
 

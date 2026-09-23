@@ -11,16 +11,20 @@ import asyncio
 import sys
 
 from textual.command import CommandPalette
-from textual.widgets import Button, DataTable, Input, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Input, Select, Static
+
+from rich.text import Text
 
 from firewalld_tui import firewall
 from firewalld_tui.app import (
+    AddPolicyModal,
+    ConfirmModal,
     FirewalldTUI,
     InputModal,
-    ServiceSelectScreen,
     ZoneSelectScreen,
 )
-from firewalld_tui.config import CONFIG_FILE, LOG_FILE, load_theme
+from firewalld_tui.config import CONFIG_FILE, LOG_FILE, load_policies, load_theme
 
 failures: list[str] = []
 
@@ -65,9 +69,29 @@ async def fill_input(pilot, value: str, submit: bool = True) -> None:
     await pilot.pause()
 
 
+def policy_dict(name: str, **overrides) -> dict:
+    """Build an AddPolicyModal result dict with PAN-OS defaults."""
+    result = {
+        "name": name,
+        "description": "",
+        "source_zone": "any",
+        "source": "any",
+        "dest_addr": "any",
+        "service": "any",
+        "port": "any",
+        "action": "allow",
+        "log": False,
+    }
+    result.update(overrides)
+    return result
+
+
 async def run() -> None:
     orig_default = firewall.get_default_zone()
     orig_iface_zone: str | None = None
+    dmz_orig_services = (
+        firewall.list_services("dmz") if "dmz" in firewall.get_zones() else []
+    )
 
     app = FirewalldTUI()
     async with app.run_test() as pilot:
@@ -79,27 +103,39 @@ async def run() -> None:
         check(app.current_zone in app.zones, f"initial current_zone={app.current_zone!r}")
         header = widget_text(app.query_one("#zone-header"))
         check(f"Zone: {app.current_zone}" in header, f"header shows current zone ({header!r})")
+        check("panos-dark" in app.available_themes, "panos-dark theme registered")
+        check("panos-light" in app.available_themes, "panos-light theme registered")
 
-        # --- rules table structure ---
-        print("rules table structure")
+        # --- policies table structure ---
+        print("policies table structure")
         table = app.query_one("#rule-table", DataTable)
         headers = [str(col.label) for col in table.columns.values()]
         check(
-            headers == ["Source", "Destination", "Protocol", "Service/Port", "Action"],
+            headers
+            == [
+                "#",
+                "Name",
+                "Source Zone",
+                "Source",
+                "Dest Zone",
+                "Destination",
+                "Service",
+                "Action",
+            ],
             f"table headers ({headers})",
         )
         check(
-            len(app._rule_rows) == table.row_count,
-            f"table row_count matches _rule_rows ({table.row_count} vs {len(app._rule_rows)})",
+            len(app._policy_rows) == table.row_count,
+            f"table row_count matches _policy_rows ({table.row_count} vs {len(app._policy_rows)})",
         )
         panel_text = "\n".join(
             widget_text(w) for w in app.query_one("#zone-details").children
         )
         check("Zone:" in panel_text, "lower panel shows zone meta")
-        if app._rule_rows:
+        if app._policy_rows:
             check(
-                app._rule_rows[0].detail in panel_text,
-                "lower panel shows selected row detail",
+                app._policy_rows[0].detail in panel_text,
+                "lower panel shows selected policy detail",
             )
         check(
             firewall._target_action("%%REJECT%%") == "reject"
@@ -108,26 +144,22 @@ async def run() -> None:
             "block/drop/default zone targets map to actions",
         )
 
-        # --- toolbar buttons open the same modals ---
+        # --- toolbar buttons ---
         print("toolbar buttons")
-        for btn_id, screen_type in (
-            ("tb-add-service", ServiceSelectScreen),
-            ("tb-add-port", InputModal),
-            ("tb-add-source", InputModal),
-            ("tb-add-rich", InputModal),
-        ):
-            await pilot.click(f"#{btn_id}")
+        await pilot.click("#tb-add-policy")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "tb-add-policy opens AddPolicyModal")
+        app.screen.query_one("#cancel", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "add policy modal cancelled")
+        # Empty table: clone/edit/toggle warn instead of opening modals.
+        for btn_id in ("#tb-clone-policy", "#tb-edit-policy", "#tb-toggle-policy"):
+            await pilot.click(btn_id)
             await pilot.pause()
             check(
-                isinstance(app.screen, screen_type),
-                f"{btn_id} opens {screen_type.__name__}",
-            )
-            app.screen.query_one("#cancel", Button).focus()
-            await pilot.press("enter")
-            await pilot.pause()
-            check(
-                not isinstance(app.screen, screen_type),
-                f"{btn_id} modal cancelled",
+                not isinstance(app.screen, ModalScreen),
+                f"{btn_id} no-ops without selection",
             )
 
         # --- sidebar zone selection ---
@@ -139,16 +171,17 @@ async def run() -> None:
         header = widget_text(app.query_one("#zone-header"))
         check(f"Zone: {target}" in header, f"header updated to {target} ({header!r})")
         check(
-            table.row_count == len(app._rule_rows) and table.row_count >= 1,
+            table.row_count == len(app._policy_rows) and table.row_count >= 1,
             f"dmz table populated ({table.row_count} rows)",
         )
         panel_text = "\n".join(
             widget_text(w) for w in app.query_one("#zone-details").children
         )
-        check(
-            app._rule_rows[0].detail in panel_text,
-            "lower panel shows selected row detail after zone switch",
-        )
+        if app._policy_rows:
+            check(
+                app._policy_rows[0].detail in panel_text,
+                "lower panel shows selected policy detail after zone switch",
+            )
 
         # --- d: set default zone ---
         print("set default zone (d)")
@@ -164,8 +197,30 @@ async def run() -> None:
         await pick(pilot, "select-list", sorted(app.zones).index(orig_default))
         check(firewall.get_default_zone() == orig_default, "default zone restored")
 
-        # --- a/x: add/remove service ---
-        print("add/remove service (a/x)")
+        # --- a: add policy modal validation (empty name stays open) ---
+        print("add policy modal validation (a)")
+        await pilot.press("a")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "add policy modal opened")
+        modal = app.screen
+        assert isinstance(modal, AddPolicyModal)
+        modal.query_one("#ok", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "empty name keeps modal open")
+        modal.query_one("#policy-name", Input).value = "Test-Validate"
+        modal.query_one("#policy-port", Input).value = "bogus"
+        modal.query_one("#ok", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "invalid port keeps modal open")
+        modal.query_one("#cancel", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "modal cancelled")
+
+        # --- add service policy via modal submit ---
+        print("add service policy via modal")
         all_services = firewall.get_services()
         zone_services = firewall.list_services(target)
         svc = "ssh"
@@ -177,17 +232,23 @@ async def run() -> None:
             svc = next(s for s in sorted(all_services) if s not in zone_services)
         await pilot.press("a")
         await pilot.pause()
-        check(isinstance(app.screen, ServiceSelectScreen), "service select modal opened")
-        await pick(pilot, "service-list", sorted(all_services).index(svc))
+        modal = app.screen
+        assert isinstance(modal, AddPolicyModal)
+        modal.query_one("#policy-name", Input).value = "Test-SSH"
+        modal.query_one("#policy-service", Select).value = svc
+        modal.query_one("#ok", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "modal submitted")
         check(svc in firewall.list_services(target), f"service {svc} added to {target}")
-        svc_rows = [r for r in app._rule_rows if r.kind == "service" and r.ref == svc]
-        check(bool(svc_rows), f"service {svc} row present in table")
+        svc_rows = [r for r in app._policy_rows if r.kind == "service" and r.ref == svc]
+        check(bool(svc_rows), f"service {svc} policy present in table")
         if svc == "ssh" and svc_rows:
             check(
                 svc_rows[0].protocol == "tcp"
                 and svc_rows[0].service_port == "ssh (22)"
                 and svc_rows[0].action == "allow",
-                f"ssh row resolved ({svc_rows[0].protocol}|{svc_rows[0].service_port}|{svc_rows[0].action})",
+                f"ssh policy resolved ({svc_rows[0].protocol}|{svc_rows[0].service_port}|{svc_rows[0].action})",
             )
         if svc_rows:
             panel_text = "\n".join(
@@ -195,66 +256,241 @@ async def run() -> None:
             )
             check(
                 svc_rows[0].detail in panel_text,
-                "lower panel tracks selected row after add",
+                "lower panel tracks selected policy after add",
             )
-        await pilot.press("x")
-        await pilot.pause()
-        zone_services = firewall.list_services(target)
-        await pick(pilot, "service-list", sorted(zone_services).index(svc))
-        check(svc not in firewall.list_services(target), f"service {svc} removed from {target}")
-        check(
-            not any(r.kind == "service" and r.ref == svc for r in app._rule_rows),
-            "service row removed from table",
-        )
 
-        # --- cancel path: a then cancel ---
-        print("service modal cancel path")
-        await pilot.press("a")
+        # --- tb-del-policy: toolbar delete opens confirm, cancel keeps it ---
+        print("toolbar delete button (tb-del-policy)")
+        await pilot.click("#tb-del-policy")
         await pilot.pause()
-        check(isinstance(app.screen, ServiceSelectScreen), "service modal opened for cancel test")
-        pilot.app.screen.query_one("#cancel", Button).focus()
+        check(isinstance(app.screen, ConfirmModal), "tb-del-policy opens confirm modal")
+        app.screen.query_one("#no", Button).focus()
         await pilot.press("enter")
         await pilot.pause()
-        check(not isinstance(app.screen, ServiceSelectScreen), "cancel closed the modal")
-        check(app.current_zone == target, "current zone unchanged after cancel")
+        check(not isinstance(app.screen, ConfirmModal), "delete confirm cancelled")
+        check(svc in firewall.list_services(target), "policy kept after cancel")
 
-        # --- p: add port (InputModal must not crash) ---
-        print("add port (p)")
-        await pilot.press("p")
+        # --- c: clone policy (prefilled Copy of, tweak, submit) ---
+        print("clone policy (c)")
+        table = app.query_one("#rule-table", DataTable)
+        svc_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        table.focus()
         await pilot.pause()
-        check(isinstance(app.screen, InputModal), "input modal opened for add port")
-        field = app.screen.query_one("#input-field", Input)
-        check(field.value == "", f"input prefilled empty (got {field.value!r})")
-        await fill_input(pilot, "8080/tcp")
+        table.move_cursor(row=svc_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "clone opens policy dialog")
+        modal = app.screen
+        assert isinstance(modal, AddPolicyModal)
+        check(
+            modal.query_one("#policy-name", Input).value == "Copy of Test-SSH",
+            "clone name prefilled as Copy of",
+        )
+        check(
+            modal.query_one("#policy-service", Select).value == svc,
+            "clone service prefilled",
+        )
+        # Tweak to a port so the clone does not collide with the original.
+        modal.query_one("#policy-service", Select).value = "any"
+        modal.query_one("#policy-port", Input).value = "9999/tcp"
+        modal.query_one("#ok", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "clone submitted")
+        check("9999/tcp" in firewall.list_ports(target), f"cloned port added to {target}")
+        check(
+            any(r.kind == "port" and r.ref == "9999/tcp" for r in app._policy_rows),
+            "cloned policy present in table",
+        )
+        check(
+            load_policies().get("9999/tcp", {}).get("name") == "Copy of Test-SSH",
+            "clone name stored",
+        )
+
+        # --- e: edit policy (prefilled, rename, submit) ---
+        print("edit policy (e)")
+        table = app.query_one("#rule-table", DataTable)
+        svc_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        table.focus()
+        await pilot.pause()
+        table.move_cursor(row=svc_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "edit opens policy dialog")
+        modal = app.screen
+        assert isinstance(modal, AddPolicyModal)
+        check(
+            modal.query_one("#policy-name", Input).value == "Test-SSH",
+            "edit name prefilled",
+        )
+        modal.query_one("#policy-name", Input).value = "Test-SSH-Renamed"
+        modal.query_one("#ok", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "edit submitted")
+        check(
+            load_policies().get(svc, {}).get("name") == "Test-SSH-Renamed",
+            "rename stored",
+        )
+        check(
+            svc in firewall.list_services(target),
+            "service still present after rename-only edit",
+        )
+
+        # --- enter on table opens edit dialog ---
+        print("enter opens edit (table focus)")
+        table = app.query_one("#rule-table", DataTable)
+        table.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(isinstance(app.screen, AddPolicyModal), "enter opens edit dialog")
+        app.screen.query_one("#cancel", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, AddPolicyModal), "edit cancelled")
+
+        # --- space: disable policy (removed, dimmed) then enable ---
+        print("disable/enable policy (space)")
+        table = app.query_one("#rule-table", DataTable)
+        svc_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        table.focus()
+        await pilot.pause()
+        table.move_cursor(row=svc_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        check(svc not in firewall.list_services(target), "service removed on disable")
+        dim_rows = [r for r in app._policy_rows if r.kind == "service" and r.ref == svc]
+        check(len(dim_rows) == 1, "disabled row kept in table")
+        dim_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        cells = list(table.get_row_at(dim_idx))
+        check(
+            isinstance(cells[1], Text) and "dim" in str(cells[1].style),
+            "disabled row rendered dimmed",
+        )
+        # Reload shifted rows; re-select the disabled row before enabling.
+        table = app.query_one("#rule-table", DataTable)
+        dim_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        table.focus()
+        await pilot.pause()
+        table.move_cursor(row=dim_idx, animate=False)
+        await pilot.pause()
+        check(
+            "Enable" in str(app.query_one("#tb-toggle-policy", Button).label),
+            "toggle button flips to Enable",
+        )
+        await pilot.press("space")
+        await pilot.pause()
+        check(svc in firewall.list_services(target), "service re-added on enable")
+        check(
+            "Disable" in str(app.query_one("#tb-toggle-policy", Button).label),
+            "toggle button flips back to Disable",
+        )
+
+        # --- cleanup cloned port via delete key ---
+        print("cleanup cloned port")
+        table = app.query_one("#rule-table", DataTable)
+        clone_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "port" and r.ref == "9999/tcp"
+        )
+        table.focus()
+        await pilot.pause()
+        table.move_cursor(row=clone_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        check(isinstance(app.screen, ConfirmModal), "delete opens confirm modal")
+        app.screen.query_one("#yes", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check("9999/tcp" not in firewall.list_ports(target), "cloned port removed")
+        check(
+            not any(r.kind == "port" and r.ref == "9999/tcp" for r in app._policy_rows),
+            "cloned policy removed from table",
+        )
+
+        # --- delete key: remove service policy with confirm ---
+        print("delete service policy (delete + confirm)")
+        table = app.query_one("#rule-table", DataTable)
+        svc_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "service" and r.ref == svc
+        )
+        table.focus()
+        await pilot.pause()
+        table.move_cursor(row=svc_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        check(isinstance(app.screen, ConfirmModal), "delete opens confirm modal")
+        app.screen.query_one("#yes", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check(not isinstance(app.screen, ConfirmModal), "confirm closed")
+        check(svc not in firewall.list_services(target), f"service {svc} removed from {target}")
+        check(
+            not any(r.kind == "service" and r.ref == svc for r in app._policy_rows),
+            "service policy removed from table",
+        )
+
+        # --- add/remove port policy via handler ---
+        print("add/remove port policy")
+        app._handle_add_policy(policy_dict("Test-Port", port="8080/tcp"))
+        await pilot.pause()
         check("8080/tcp" in firewall.list_ports(target), f"port 8080/tcp added to {target}")
-        port_rows = [r for r in app._rule_rows if r.kind == "port" and r.ref == "8080/tcp"]
+        port_rows = [r for r in app._policy_rows if r.kind == "port" and r.ref == "8080/tcp"]
         check(
             bool(port_rows)
             and port_rows[0].protocol == "tcp"
             and port_rows[0].service_port == "8080"
             and port_rows[0].action == "allow",
-            f"port row in table ({port_rows[0] if port_rows else None})",
+            f"port policy in table ({port_rows[0] if port_rows else None})",
         )
-
-        # --- cancel path: p then cancel ---
-        print("port modal cancel path")
-        await pilot.press("p")
+        table = app.query_one("#rule-table", DataTable)
+        port_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "port" and r.ref == "8080/tcp"
+        )
+        table.focus()
         await pilot.pause()
-        pilot.app.screen.query_one("#cancel", Button).focus()
+        table.move_cursor(row=port_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        app.screen.query_one("#yes", Button).focus()
         await pilot.press("enter")
         await pilot.pause()
-        check(not isinstance(app.screen, InputModal), "cancel closed the port modal")
-
-        # --- P: remove port (via OK button) ---
-        print("remove port (P)")
-        await pilot.press("P")
-        await pilot.pause()
-        check(isinstance(app.screen, InputModal), "input modal opened for remove port")
-        await fill_input(pilot, "8080/tcp", submit=False)
         check("8080/tcp" not in firewall.list_ports(target), f"port 8080/tcp removed from {target}")
         check(
-            not any(r.kind == "port" and r.ref == "8080/tcp" for r in app._rule_rows),
-            "port row removed from table",
+            not any(r.kind == "port" and r.ref == "8080/tcp" for r in app._policy_rows),
+            "port policy removed from table",
         )
 
         # --- i/I: add/remove interface ---
@@ -283,56 +519,64 @@ async def run() -> None:
         else:
             print("  [skip] no non-lo interface found")
 
-        # --- s/S: add/remove source ---
-        print("add/remove source (s/S)")
+        # --- add/remove source policy via handler ---
+        print("add/remove source policy")
         source = "10.0.0.0/24"
-        await pilot.press("s")
+        app._handle_add_policy(policy_dict("Test-Source", source=source))
         await pilot.pause()
-        check(isinstance(app.screen, InputModal), "input modal opened for add source")
-        await fill_input(pilot, source)
         check(source in firewall.list_sources(target), f"source {source} added to {target}")
-        src_rows = [r for r in app._rule_rows if r.kind == "source" and r.ref == source]
-        check(bool(src_rows), "source row present in table")
+        src_rows = [r for r in app._policy_rows if r.kind == "source" and r.ref == source]
+        check(bool(src_rows), "source policy present in table")
         if src_rows:
             expected = firewall._target_action(firewall.list_zone(target).target)
             check(
                 src_rows[0].action == expected,
-                f"source row action matches zone target ({src_rows[0].action} vs {expected})",
+                f"source policy action matches zone target ({src_rows[0].action} vs {expected})",
             )
-        await pilot.press("S")
+        table = app.query_one("#rule-table", DataTable)
+        src_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "source" and r.ref == source
+        )
+        table.focus()
         await pilot.pause()
-        check(isinstance(app.screen, ZoneSelectScreen), "source select modal opened")
-        await pick(pilot, "select-list", sorted(firewall.list_sources(target)).index(source))
+        table.move_cursor(row=src_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        app.screen.query_one("#yes", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
         check(source not in firewall.list_sources(target), f"source {source} removed from {target}")
         check(
-            not any(r.kind == "source" and r.ref == source for r in app._rule_rows),
-            "source row removed from table",
+            not any(r.kind == "source" and r.ref == source for r in app._policy_rows),
+            "source policy removed from table",
         )
 
-        # --- R/delete: add rule, delete its table row ---
-        print("add/remove rich rule (R + delete key)")
-        rule = "rule family='ipv4' source address='10.9.9.9' drop"
-        await pilot.press("R")
+        # --- add rich policy with drop, delete its table row ---
+        print("add/remove drop policy (rich)")
+        app._handle_add_policy(
+            policy_dict("Test-Drop", source="10.9.9.9", action="drop")
+        )
         await pilot.pause()
-        check(isinstance(app.screen, InputModal), "input modal opened for add rich rule")
-        await fill_input(pilot, rule)
         # firewalld normalizes quotes ('ipv4' -> "ipv4"), so match on the address
         stored = [r for r in firewall.list_rich_rules(target) if "10.9.9.9" in r]
-        check(bool(stored), "rich rule added")
+        check(bool(stored), "drop policy added")
         rich_idx = next(
             (
                 i
-                for i, r in enumerate(app._rule_rows)
+                for i, r in enumerate(app._policy_rows)
                 if r.kind == "rich" and "10.9.9.9" in r.ref
             ),
             None,
         )
-        check(rich_idx is not None, "rich rule row present in table")
+        check(rich_idx is not None, "drop policy present in table")
         if rich_idx is not None:
-            rr = app._rule_rows[rich_idx]
+            rr = app._policy_rows[rich_idx]
             check(
                 rr.source == "10.9.9.9" and rr.action == "drop",
-                f"rich rule row parsed ({rr.source}|{rr.action})",
+                f"drop policy parsed ({rr.source}|{rr.action})",
             )
             table = app.query_one("#rule-table", DataTable)
             table.focus()
@@ -341,20 +585,20 @@ async def run() -> None:
             await pilot.pause()
             await pilot.press("delete")
             await pilot.pause()
-            check(
-                not isinstance(app.screen, ZoneSelectScreen),
-                "delete removes the selected row directly (no modal)",
-            )
+            check(isinstance(app.screen, ConfirmModal), "delete opens confirm modal")
+            app.screen.query_one("#yes", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause()
             check(
                 not [r for r in firewall.list_rich_rules(target) if "10.9.9.9" in r],
-                "rich rule removed",
+                "drop policy removed",
             )
             check(
                 not any(
                     r.kind == "rich" and "10.9.9.9" in r.ref
-                    for r in app._rule_rows
+                    for r in app._policy_rows
                 ),
-                "rich rule row removed from table",
+                "drop policy removed from table",
             )
 
         # --- t: toggle runtime/permanent ---
@@ -364,13 +608,24 @@ async def run() -> None:
         mode = widget_text(app.query_one("#mode-indicator"))
         check("Permanent" in mode, f"indicator shows Permanent ({mode!r})")
         perm_port = "9090/tcp"
-        await pilot.press("p")
+        app._handle_add_policy(policy_dict("Test-Perm", port=perm_port))
         await pilot.pause()
-        await fill_input(pilot, perm_port)
         check(perm_port in firewall.list_ports(target, permanent=True), "port added in permanent mode")
-        await pilot.press("P")
+        table = app.query_one("#rule-table", DataTable)
+        perm_idx = next(
+            i
+            for i, r in enumerate(app._policy_rows)
+            if r.kind == "port" and r.ref == perm_port
+        )
+        table.focus()
         await pilot.pause()
-        await fill_input(pilot, perm_port, submit=False)
+        table.move_cursor(row=perm_idx, animate=False)
+        await pilot.pause()
+        await pilot.press("delete")
+        await pilot.pause()
+        app.screen.query_one("#yes", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
         check(perm_port not in firewall.list_ports(target, permanent=True), "port removed in permanent mode")
         await pilot.press("t")
         await pilot.pause()
@@ -395,7 +650,7 @@ async def run() -> None:
         check(not isinstance(app.screen, CommandPalette), "theme picker closed on escape")
         check(app.theme == orig_theme, "theme unchanged after open/close")
 
-        test_theme = "nord" if "nord" in app.available_themes else next(iter(app.available_themes))
+        test_theme = "panos-dark"
         app.theme = test_theme
         await pilot.pause()
         check(app.theme == test_theme, f"theme applied ({test_theme})")
@@ -419,10 +674,13 @@ async def run() -> None:
     check("bogus-theme" in LOG_FILE.read_text(), "fallback warning logged to file")
     CONFIG_FILE.write_text(good_conf)
 
-    # --- teardown: restore interface binding ---
+    # --- teardown: restore interface binding, default zone, dmz services ---
     if orig_iface_zone and ifaces:
         firewall.add_interface(iface, orig_iface_zone)
     firewall.set_default_zone(orig_default)
+    for s in dmz_orig_services:
+        if s not in firewall.list_services("dmz"):
+            firewall.add_service(s, "dmz")
 
 
 asyncio.run(run())

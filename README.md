@@ -27,26 +27,26 @@ uv run firewalld-tui
 | `q` | Quit |
 | `r` | Refresh |
 | `d` | Set default zone |
-| `a` | Add service |
-| `x` | Remove service |
-| `p` | Add port |
-| `P` | Remove port |
+| `a` | Add policy (PAN-OS style Security Policy Rule dialog) |
+| `Delete` | Delete selected policy (with confirmation) |
+| `c` | Clone selected policy (pre-filled dialog) |
+| `e` / `Enter` | Edit selected policy (pre-filled dialog) |
+| `Space` / `x` | Disable / Enable selected policy |
 | `i` | Add interface |
 | `I` | Remove interface |
-| `s` | Add source |
-| `S` | Remove source |
-| `R` | Add rich rule |
-| `Delete` | Remove selected rule row |
 | `t` | Toggle runtime/permanent mode |
-| `F1` | Change theme (fuzzy picker) |
+| `F1` | Change theme (includes `panos-dark` / `panos-light`) |
+
+The bottom toolbar mirrors these actions PanOS-style: `+ Add`, `- Delete`, `Clone`, `Edit`, `Disable`/`Enable`.
 
 ## Features
 
+- **Security Policies** - PAN-OS style policy table (`#`, Name, Source Zone, Source, Dest Zone, Destination, Service, Action)
+- **Add Policy dialog** - Tabbed modal (General / Source / Destination / Service / Action) with Name, validation, and Allow/Drop/Deny actions; reused for Clone (`Copy of …`) and Edit (pre-filled)
+- **Disable / Enable** - Disabled policies are removed from firewalld but kept as dimmed rows; Enable re-adds them
 - **Zone Management** - List zones, view details, set default zone
-- **Rules Table** - PanOS-style table of Source, Destination, Protocol, Service/Port, and Action, synthesized from services, ports, sources, and rich rules
-- **Toolbar** - One-click buttons for adding services, ports, sources, and rich rules
-- **Detail Panel** - Lower panel shows the selected rule's detail plus zone metadata
-- **Service/Port Rules** - Add, remove, list services and ports
-- **Interface/Source Binding** - Bind interfaces or source IPs to zones
-- **Rich Rules** - View and manage rich language rules
+- **Interface Binding** - Bind interfaces to zones
 - **Runtime vs Permanent** - Toggle between runtime and permanent configurations
+- **Themes** - `panos-dark` and `panos-light` Palo Alto inspired themes alongside the built-in Textual themes
+
+Policy names (plus disabled state) are stored in `~/.firewalld-tui/policies.json` keyed by firewalld ref (firewalld itself has no named or disabled rules).

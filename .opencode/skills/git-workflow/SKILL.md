@@ -9,56 +9,91 @@ Automates the full feature branch workflow: create branch → stage → commit �
 
 ## Pre-flight Checks
 
-Before starting, verify all prerequisites:
+Run this block first — copy-paste as-is:
 
-1. **Git repository**: Run `git rev-parse --is-inside-work-tree` to confirm we're in a repo
-2. **gh CLI**: Run `gh auth status` to confirm GitHub CLI is installed and authenticated. If not, tell the user to install it (`sudo apt install gh` or `brew install gh`) and authenticate (`gh auth login`)
-3. **Remote**: Run `git remote -v` to verify a remote exists. If no remote, ask the user for the GitHub repo URL or prompt them to add one
-4. **Clean state check**: Run `git status --porcelain` to detect uncommitted changes. If changes exist, ask the user whether to include them or stash first
+```bash
+git rev-parse --is-inside-work-tree
+gh auth status || echo "MISSING_GH_AUTH"
+git remote -v
+git status --porcelain
+gh repo view --json defaultBranchRef --jq .defaultBranchRef.name
+```
+
+Interpret results:
+
+1. **Git repository**: First command must print `true`. If not, stop — not a repo.
+2. **gh CLI**: If `MISSING_GH_AUTH` appears, run `gh auth login` interactively. If `gh` is not installed at all, stop and tell the user to install it (`sudo apt install gh` or `brew install gh`) with a link to https://cli.github.com — do not attempt sudo installs yourself.
+3. **Remote**: `git remote -v` must show an `origin`. If empty, ask the user for the GitHub repo URL, then `git remote add origin <url>`.
+4. **Dirty worktree**: `git status --porcelain` output means uncommitted changes. Show `git diff --stat` to the user and ask: include them in this PR, or stash first (`git stash push -m "wip: <desc>"`)?
+5. **Default branch**: Last command prints the real base (e.g. `main`, `master`, `develop`). Use this value as `$BASE` below — never hardcode `main`.
 
 ## Branch Creation
 
 Generate a branch name from the user's description:
 
-- Use conventional prefix: `feature/`, `fix/`, `docs/`, `refactor/`, `chore/`
-- Convert description to kebab-case (e.g., "add user login" → `feature/add-user-login`)
+- Infer prefix from changed files (`git diff --cached --name-only` or `git status --porcelain`):
+  - docs-only changes → `docs/`
+  - `src/firewalld_tui/` → `feat/` (or `fix/` if it fixes a bug)
+  - `Dockerfile`, `docker-compose.yml`, `scripts/` → `chore/` or `feat/`
+  - `.opencode/skills/` → `chore/` or `docs/`
+- Convert description to kebab-case (e.g., "add user login" → `feature/add-user-login` — note: use `feature/`, not `feat/`, for the branch prefix; `feat` is only the commit type)
 - If no description given, ask: "What feature or fix are you working on?"
-- Create and switch: `git checkout -b <branch-name>`
-- If branch already exists, ask whether to reuse it or create a new one with a suffix
+- Sync first: `git fetch origin`
+- Create and switch: `git switch -c <branch-name>`
+- If branch already exists locally or on remote, offer: reuse it (`git switch <branch>`), or create `<branch-name>-2`
 
 ## Stage and Commit
 
-1. **Stage changes**:
-   - If user said "all" or there are many files: `git add .`
-   - Otherwise, list changed files and ask what to stage
-   - Always exclude secrets, `.env`, credentials via `.gitignore`
+1. **Preview**: Always show `git diff --stat` before staging so the user sees scope.
 
-2. **Generate commit message** using conventional commits:
-   - Analyze the diff to determine type: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
-   - Write a short subject line (≤72 chars) in imperative mood
-   - If complex, add a body explaining what and why (not how)
+2. **Stage changes**:
+   - If user said "all": `git add .`
+   - For partial staging: `git add <paths...>` or `git add -p` for interactive hunks
+   - Verify nothing sensitive is staged: `git diff --cached --name-only | grep -Ei '\.env|secret|credential|pem$|key$'` — if matches, stop and warn
+   - Confirm `.gitignore` covers the match via `git check-ignore <file>`
+
+3. **Generate commit message** using conventional commits:
+   - Derive type from the diff: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
+   - Repo scopes: `tui` (app.py UI), `firewall` (firewall.py), `config` (config.py/logging), `docker` (Dockerfile/compose), `skill` (.opencode/skills/)
+   - Short subject line (≤72 chars), imperative mood
    - Format: `type(scope): description`
+   - If complex, add a body explaining what and why (not how)
 
-3. **Commit**: `git commit -m "<message>"`
+4. **Commit**: `git commit -m "<message>"`
+   - Do not pass `--no-verify` unless hooks block and the user explicitly approves skipping them
 
 ## Push to Remote
 
-- Push branch and set upstream: `git push -u origin <branch-name>`
-- If push fails due to permission, guide the user through authentication
+- Push with upstream tracking (works even after `switch`): `git push -u origin HEAD`
+- If push is rejected (non-fast-forward): `git pull --rebase origin <branch>` then retry. If it still fails, check permissions and guide through auth — do not force-push without explicit user approval.
 
 ## Create Pull Request
 
-Use `gh pr create` with auto-generated content:
+Detect the real base branch — never hardcode `main`:
+
+```bash
+BASE=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+```
+
+Guard against duplicates before creating:
+
+```bash
+gh pr view --head <branch-name> --json url 2>/dev/null || echo "NO_EXISTING_PR"
+```
+
+If a PR already exists, report its URL instead of creating a new one.
+
+Otherwise create with auto-generated content:
 
 ```bash
 gh pr create \
   --title "<auto-generated-title>" \
   --body "<auto-generated-body>" \
-  --base main
+  --base "$BASE"
 ```
 
 ### PR Title
-Derive from commit message subject line. Keep it concise and descriptive.
+Derive from commit message subject line. Keep it concise and descriptive. If multiple commits, use the most representative one.
 
 ### PR Body
 Generate a body with these sections:
@@ -68,10 +103,10 @@ Generate a body with these sections:
 <1-2 sentence overview of changes>
 
 ## Changes
-- <bullet list of key changes>
+- <bullet list of key changes, parsed from commit messages>
 
 ## Testing
-<How to test these changes>
+<How to test these changes — e.g. `uv run firewalld-tui`, or the Docker smoke test from AGENTS.md>
 
 Closes #<issue-number if applicable>
 ```
@@ -82,31 +117,44 @@ Closes #<issue-number if applicable>
 
 ## Report Back
 
-After PR is created, display:
-- PR URL (from `gh pr create` output)
-- Branch name
-- Number of files changed
+After PR is created, parse and display:
+
+```bash
+gh pr view --json url,number,title --jq '"\(.url) (#\(.number)): \(.title)"'
+```
+
+Report to the user:
+- PR URL and number
+- Branch name and base (`<branch> → <base>`)
+- Number of files changed (`git diff --stat <base>...HEAD | tail -1`)
 - Summary of changes
+
+## See Also
+
+- `AGENTS.md` in the repo root — Gotchas (widget IDs, reactive props), Docker smoke test command, logging locations
+- `docker-firewalld` skill — build/run the container and verify changes before opening the PR
 
 ## Error Handling
 
 | Error | Action |
 |-------|--------|
-| `gh` not installed | Tell user to install: `sudo apt install gh` or `brew install gh` |
+| `gh` not installed | Stop. Tell user to install from https://cli.github.com (`sudo apt install gh` or `brew install gh`). Do not sudo-install yourself |
 | Not authenticated | Run `gh auth login` interactively |
-| No remote | Ask user for repo URL or `git remote add origin <url>` |
-| Branch exists | Offer to reuse or suggest `<branch-name>-2` |
-| Push rejected | Check permissions, guide through auth |
+| No remote | Ask user for repo URL, then `git remote add origin <url>` |
+| Branch exists | Offer to reuse (`git switch <branch>`) or suggest `<branch-name>-2` |
+| Push rejected (non-fast-forward) | `git pull --rebase`, retry; never force-push without explicit approval |
+| Push rejected (permission) | Check permissions, guide through auth |
+| PR already exists | Report existing URL, do not duplicate |
 | PR creation fails | Show error, suggest manual PR creation |
 
 ## Example Session
 
 User: "Create a PR for the login feature"
 
-1. Check prerequisites (git repo, gh auth, remote)
-2. `git checkout -b feature/login`
-3. `git add .`
+1. Run pre-flight block (repo ✓, gh ✓, origin ✓, dirty files shown, base = `main`)
+2. `git fetch origin && git switch -c feature/login`
+3. `git diff --stat` shown; `git add .`; secret grep clean
 4. `git commit -m "feat(auth): add user login functionality"`
-5. `git push -u origin feature/login`
-6. `gh pr create --title "feat(auth): add user login functionality" --body "..."`
-7. Report: "PR created at https://github.com/user/repo/pull/42"
+5. `git push -u origin HEAD`
+6. `gh pr view --head feature/login` → none; `gh pr create --title "feat(auth): add user login functionality" --body "..." --base main`
+7. Report: "PR created: https://github.com/user/repo/pull/42 (#42) — feature/login → main, 5 files changed"
