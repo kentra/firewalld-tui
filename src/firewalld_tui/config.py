@@ -29,7 +29,16 @@ retention = 7 days
 
 [ui]
 theme = textual-dark
+
+[dashboard]
+poll_interval = 5
+
+[monitor]
+max_rows = 500
 """
+
+DASHBOARD_DEFAULTS: dict[str, str] = {"poll_interval": "5"}
+MONITOR_DEFAULTS: dict[str, str] = {"max_rows": "500"}
 
 
 def _read_config() -> tuple[ConfigParser | None, ConfigParserError | None]:
@@ -195,6 +204,61 @@ def delete_policy(ref: str) -> None:
         _write_policies(policies)
 
 
+def _section_values(section: str, defaults: dict[str, str]) -> dict[str, str]:
+    """Read a config section merged over defaults (missing file -> defaults)."""
+    values = dict(defaults)
+    parser, _ = _read_config()
+    if parser is not None and parser.has_section(section):
+        for key in values:
+            if key in parser[section]:
+                values[key] = parser[section][key]
+    return values
+
+
+def _write_section_values(section: str, values: dict[str, str]) -> None:
+    """Write keys into a config section, preserving all other sections."""
+    parser, error = _read_config()
+    if parser is None:
+        logger.warning(
+            "Cannot save [{}] to {}: {}", section, CONFIG_FILE, error or "unparseable"
+        )
+        return
+    if not parser.has_section(section):
+        parser.add_section(section)
+    for key, value in values.items():
+        parser.set(section, key, value)
+    with open(CONFIG_FILE, "w") as f:
+        parser.write(f)
+
+
+def load_dashboard_settings() -> dict[str, str]:
+    """Return [dashboard] settings (poll_interval in seconds)."""
+    return _section_values("dashboard", DASHBOARD_DEFAULTS)
+
+
+def save_dashboard_settings(values: dict[str, str]) -> None:
+    """Persist [dashboard] settings."""
+    _write_section_values("dashboard", values)
+    logger.info("dashboard settings saved: {}", values)
+
+
+def load_monitor_settings() -> dict[str, str]:
+    """Return [monitor] settings (max_rows per query)."""
+    return _section_values("monitor", MONITOR_DEFAULTS)
+
+
+def save_monitor_settings(values: dict[str, str]) -> None:
+    """Persist [monitor] settings."""
+    _write_section_values("monitor", values)
+    logger.info("monitor settings saved: {}", values)
+
+
+def save_logging_settings(values: dict[str, str]) -> None:
+    """Persist [logging] settings (takes effect after reconfigure_logging)."""
+    _write_section_values("logging", values)
+    logger.info("logging settings saved: {}", values)
+
+
 class InterceptHandler(logging.Handler):
     """Route stdlib logging (e.g. Textual's) through loguru."""
 
@@ -265,3 +329,14 @@ def setup_logging() -> None:
 
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     _setup_done = True
+
+
+def reconfigure_logging() -> None:
+    """Re-read the config file and rebuild the loguru file sink.
+
+    Used by the Settings tab after the user edits [logging]; unlike
+    setup_logging() this is not a no-op on repeat calls.
+    """
+    global _setup_done
+    _setup_done = False
+    setup_logging()

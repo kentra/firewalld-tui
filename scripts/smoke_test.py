@@ -144,6 +144,122 @@ async def run() -> None:
             "block/drop/default zone targets map to actions",
         )
 
+        # --- header tabs: dashboard / monitor / settings ---
+        print("header tabs")
+        check(app.active_tab == "policies", "default tab is policies")
+        await pilot.press("2")
+        await pilot.pause()
+        check(app.active_tab == "monitor", "key 2 switches to monitor")
+        check(
+            app.query_one("#log-filter", Input) is not None,
+            "filter bar present",
+        )
+        # Seed deterministic traffic rows (TEST-NET-3). Wipe previous test
+        # rows first so exact-match counts hold across reruns.
+        from datetime import datetime
+
+        from firewalld_tui import db as dbmod
+
+        with dbmod.session_scope() as _s:
+            _s.query(dbmod.TrafficLog).filter(
+                dbmod.TrafficLog.src_ip.in_(["203.0.113.7", "203.0.113.8"])
+            ).delete()
+        now = datetime.now()
+        dbmod.add_traffic_log(
+            receive_time=now,
+            src_ip="203.0.113.7",
+            dst_ip="198.51.100.9",
+            dst_port=53,
+            proto="udp",
+            action="allow",
+            rule="Test-DNS",
+            app="dns",
+            service="dns",
+        )
+        dbmod.add_traffic_log(
+            receive_time=now,
+            src_ip="203.0.113.8",
+            dst_ip="198.51.100.9",
+            dst_port=22,
+            proto="tcp",
+            action="drop",
+            rule="Test-Block",
+            app="ssh",
+            service="ssh",
+        )
+        field = app.query_one("#log-filter", Input)
+        field.value = ""
+        field.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        traffic = app.query_one("#traffic-table", DataTable)
+        check(traffic.row_count >= 2, f"monitor shows seeded rows ({traffic.row_count})")
+        # PAN-OS filter narrows to one row.
+        field.value = "(addr.src in 203.0.113.7) and (action eq allow)"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        check(traffic.row_count == 1, f"filter narrows to 1 row ({traffic.row_count})")
+        status = widget_text(app.query_one("#filter-status"))
+        check("Filter: OK" in status, f"filter status ok ({status!r})")
+        # Invalid filter keeps previous rows and reports the error.
+        field.value = "(bogus"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        check(traffic.row_count == 1, "invalid filter keeps previous rows")
+        status = widget_text(app.query_one("#filter-status"))
+        check("Filter error" in status, "invalid filter reported in status")
+        # No-match filter is deterministic across reruns.
+        field.value = "(addr.src in 198.51.100.99)"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        check(traffic.row_count == 0, "no-match filter shows 0 rows")
+
+        print("dashboard tab")
+        await pilot.click("#htab-dashboard")
+        await pilot.pause()
+        check(app.active_tab == "dashboard", "header button switches to dashboard")
+        await app._refresh_dashboard()
+        await pilot.pause()
+        sys_text = widget_text(app.query_one("#dash-system"))
+        check(
+            "CPU" in sys_text and "Memory" in sys_text,
+            f"dashboard system line ({sys_text!r})",
+        )
+        fw_text = widget_text(app.query_one("#dash-fw"))
+        check("firewalld" in fw_text, f"dashboard firewall line ({fw_text!r})")
+        dash_pol = app.query_one("#dash-policies", DataTable)
+        check(
+            dash_pol.row_count >= 1,
+            f"dashboard top policies populated ({dash_pol.row_count})",
+        )
+
+        print("settings tab")
+        await pilot.press("4")
+        await pilot.pause()
+        check(app.active_tab == "settings", "key 4 switches to settings")
+        poll_field = app.query_one("#sett-poll", Input)
+        check(poll_field.value == "5", f"poll interval loaded ({poll_field.value!r})")
+        poll_field.value = "10"
+        app.query_one("#sett-save", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check("poll_interval = 10" in CONFIG_FILE.read_text(), "poll interval saved")
+        poll_field.value = "5"
+        app.query_one("#sett-save", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        check("poll_interval = 5" in CONFIG_FILE.read_text(), "poll interval restored")
+
+        print("back to policies")
+        await pilot.press("3")
+        await pilot.pause()
+        check(app.active_tab == "policies", "key 3 switches back to policies")
+
         # --- toolbar buttons ---
         print("toolbar buttons")
         await pilot.click("#tb-add-policy")

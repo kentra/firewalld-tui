@@ -2,7 +2,8 @@ FROM almalinux:latest
 
 ENV container=docker
 
-# Install firewalld and core dependencies
+# Install firewalld and core dependencies (conntrack-tools + iproute feed
+# the dashboard/monitor samplers; NET_ADMIN is granted in docker-compose.yml)
 RUN dnf -y install \
     firewalld \
     dbus \
@@ -11,6 +12,8 @@ RUN dnf -y install \
     python3-pip \
     python3-devel \
     gcc \
+    conntrack-tools \
+    iproute \
     && dnf clean all
 
 # Install the TUI package

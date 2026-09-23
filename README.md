@@ -36,6 +36,8 @@ uv run firewalld-tui
 | `I` | Remove interface |
 | `t` | Toggle runtime/permanent mode |
 | `F1` | Change theme (includes `panos-dark` / `panos-light`) |
+| `1`–`4` | Switch tab: Dashboard / Monitor / Policies / Settings |
+| `/` | Jump to Monitor and focus the filter bar |
 
 The bottom toolbar mirrors these actions PanOS-style: `+ Add`, `- Delete`, `Clone`, `Edit`, `Disable`/`Enable`.
 
@@ -50,3 +52,12 @@ The bottom toolbar mirrors these actions PanOS-style: `+ Add`, `- Delete`, `Clon
 - **Themes** - `panos-dark` and `panos-light` Palo Alto inspired themes alongside the built-in Textual themes
 
 Policy names (plus disabled state) are stored in `~/.firewalld-tui/policies.json` keyed by firewalld ref (firewalld itself has no named or disabled rules).
+
+## Tabs
+
+- **Dashboard** - System resources, firewall info, top policies and top talkers (7-day hits from the traffic DB)
+- **Monitor** - PAN-OS style traffic log table with a filter bar accepting Palo Alto syntax, e.g. `(addr.src in 10.0.0.0/24) and (action eq allow)`
+- **Policies** - Zones sidebar + policy table (the main screen)
+- **Settings** - Live editor for `~/.firewalld-tui/firewalld-tui.conf` (`[logging]`, `[ui]` theme, `[dashboard]` poll interval, `[monitor]` max rows)
+
+Traffic events are logged to `~/.firewalld-tui/traffic.db` (SQLite, 7-day retention) by a background thread tailing kernel nftables logs while the app runs. The Monitor is empty until real traffic is logged (enable `LogDenied` or per-policy logging).
