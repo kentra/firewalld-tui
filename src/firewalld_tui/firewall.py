@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 
+from loguru import logger
+
 
 @dataclass
 class ZoneInfo:
@@ -26,16 +28,27 @@ class ZoneInfo:
 def _run(args: list[str], check: bool = True) -> str:
     """Run a firewall-cmd command and return stdout."""
     cmd = ["firewall-cmd"] + args
+    logger.debug("running: {}", cmd)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if check and result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"firewall-cmd failed: {cmd}")
+        error = result.stderr.strip() or f"firewall-cmd failed: {cmd}"
+        logger.error("command failed (rc={}): {} -> {}", result.returncode, cmd, error)
+        raise RuntimeError(error)
     return result.stdout.strip()
 
 
 def _run_quiet(args: list[str]) -> bool:
     """Run a firewall-cmd command and return True on success."""
     cmd = ["firewall-cmd"] + args
+    logger.debug("running: {}", cmd)
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning(
+            "command failed (rc={}): {} -> {}",
+            result.returncode,
+            cmd,
+            result.stderr.strip() or result.stdout.strip(),
+        )
     return result.returncode == 0
 
 

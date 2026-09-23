@@ -15,7 +15,8 @@ uv run firewalld-tui # Run the TUI (needs firewall-cmd in PATH)
 src/firewalld_tui/
 ├── app.py        # Textual TUI app (main UI, screens, modals)
 ├── firewall.py   # Subprocess wrapper for firewall-cmd commands
-└── __init__.py   # Entry point, exports main()
+├── config.py     # loguru setup; ~/.firewalld-tui/firewalld-tui.conf
+└── __init__.py   # Entry point, exports main(); calls setup_logging()
 scripts/
 ├── docker-start.sh  # Container entrypoint (dbus + firewalld)
 └── smoke_test.py    # Pilot-based e2e test of all TUI bindings
@@ -59,3 +60,9 @@ No linter or formatter is configured.
 - The `#zone-header` widget is created in `compose()` and updated in-place via `.update()` — don't mount a new one
 - Textual 8 gotchas: `str(widget)` returns `"Label()"` not the text (use `ListItem(..., name=value)` / `event.item.name`); `ListView` uses `.index` not `.highlighted`; widget content is `.content` not `.renderable`
 - Don't call `query_one()` inside `compose()` — widgets aren't mounted yet; pass values via `Input(value=...)` instead
+
+## Logging
+
+- loguru writes to `~/.firewalld-tui/firewalld-tui.log` (in Docker: `/root/.firewalld-tui/`)
+- `level`, `rotation`, `retention` are set in `~/.firewalld-tui/firewalld-tui.conf` (`[logging]` section, created with defaults on first run)
+- Config/logging setup lives in `config.py`; `firewall.py` logs every `firewall-cmd` call (DEBUG) and failures, `app.py` logs errors + successful mutations (INFO)
