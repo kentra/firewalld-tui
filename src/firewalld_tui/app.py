@@ -18,6 +18,7 @@ from textual.widgets import (
     ListView,
     Static,
 )
+from loguru import logger
 
 from . import firewall
 
@@ -356,6 +357,7 @@ class FirewalldTUI(App):
             if self.current_zone not in self.zones:
                 self.current_zone = self.zones[0] if self.zones else None
         except RuntimeError as e:
+            logger.error("Error loading zones: {}", e)
             self.notify(f"Error loading zones: {e}", severity="error")
 
     def watch_current_zone(self, new_zone: str | None) -> None:
@@ -456,6 +458,7 @@ class FirewalldTUI(App):
                     details.mount(Static(f"  {rule}", classes="detail-row"))
 
         except RuntimeError as e:
+            logger.error("Error loading zone details: {}", e)
             self.notify(f"Error loading zone details: {e}", severity="error")
 
     def action_refresh(self) -> None:
@@ -476,11 +479,13 @@ class FirewalldTUI(App):
         if zone:
             try:
                 if firewall.set_default_zone(zone):
+                    logger.info("default zone set to {}", zone)
                     self.notify(f"Default zone set to {zone}")
                     self.action_refresh()
                 else:
                     self.notify("Failed to set default zone", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_add_service(self) -> None:
@@ -492,17 +497,20 @@ class FirewalldTUI(App):
             services = firewall.get_services()
             self.push_screen(ServiceSelectScreen(services), self._handle_add_service)
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_add_service(self, service: str | None) -> None:
         if service and self.current_zone:
             try:
                 if firewall.add_service(service, self.current_zone, self.permanent_mode):
+                    logger.info("added service {} to {}", service, self.current_zone)
                     self.notify(f"Added {service} to {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to add {service}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_remove_service(self) -> None:
@@ -517,17 +525,20 @@ class FirewalldTUI(App):
                 return
             self.push_screen(ServiceSelectScreen(services), self._handle_remove_service)
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_remove_service(self, service: str | None) -> None:
         if service and self.current_zone:
             try:
                 if firewall.remove_service(service, self.current_zone, self.permanent_mode):
+                    logger.info("removed service {} from {}", service, self.current_zone)
                     self.notify(f"Removed {service} from {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to remove {service}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_add_port(self) -> None:
@@ -544,11 +555,13 @@ class FirewalldTUI(App):
         if port and self.current_zone:
             try:
                 if firewall.add_port(port, self.current_zone, self.permanent_mode):
+                    logger.info("added port {} to {}", port, self.current_zone)
                     self.notify(f"Added port {port} to {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to add port {port}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_remove_port(self) -> None:
@@ -563,17 +576,20 @@ class FirewalldTUI(App):
                 return
             self.push_screen(InputModal("Remove Port", "Port to remove (e.g., 8080/tcp)"), self._handle_remove_port)
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_remove_port(self, port: str | None) -> None:
         if port and self.current_zone:
             try:
                 if firewall.remove_port(port, self.current_zone, self.permanent_mode):
+                    logger.info("removed port {} from {}", port, self.current_zone)
                     self.notify(f"Removed port {port} from {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to remove port {port}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_add_interface(self) -> None:
@@ -590,11 +606,13 @@ class FirewalldTUI(App):
         if interface and self.current_zone:
             try:
                 if firewall.add_interface(interface, self.current_zone, self.permanent_mode):
+                    logger.info("added interface {} to {}", interface, self.current_zone)
                     self.notify(f"Added interface {interface} to {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to add interface {interface}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_remove_interface(self) -> None:
@@ -609,17 +627,20 @@ class FirewalldTUI(App):
                 return
             self.push_screen(ZoneSelectScreen(interfaces, "Select interface to remove:"), self._handle_remove_interface)
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_remove_interface(self, interface: str | None) -> None:
         if interface and self.current_zone:
             try:
                 if firewall.remove_interface(interface, self.current_zone, self.permanent_mode):
+                    logger.info("removed interface {} from {}", interface, self.current_zone)
                     self.notify(f"Removed interface {interface} from {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to remove interface {interface}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_add_source(self) -> None:
@@ -636,11 +657,13 @@ class FirewalldTUI(App):
         if source and self.current_zone:
             try:
                 if firewall.add_source(source, self.current_zone, self.permanent_mode):
+                    logger.info("added source {} to {}", source, self.current_zone)
                     self.notify(f"Added source {source} to {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to add source {source}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_remove_source(self) -> None:
@@ -655,17 +678,20 @@ class FirewalldTUI(App):
                 return
             self.push_screen(ZoneSelectScreen(sources, "Select source to remove:"), self._handle_remove_source)
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_remove_source(self, source: str | None) -> None:
         if source and self.current_zone:
             try:
                 if firewall.remove_source(source, self.current_zone, self.permanent_mode):
+                    logger.info("removed source {} from {}", source, self.current_zone)
                     self.notify(f"Removed source {source} from {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify(f"Failed to remove source {source}", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_add_rich_rule(self) -> None:
@@ -685,11 +711,13 @@ class FirewalldTUI(App):
         if rule and self.current_zone:
             try:
                 if firewall.add_rich_rule(rule, self.current_zone, self.permanent_mode):
+                    logger.info("added rich rule to {}", self.current_zone)
                     self.notify(f"Added rich rule to {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify("Failed to add rich rule", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
     def action_remove_rich_rule(self) -> None:
@@ -708,22 +736,26 @@ class FirewalldTUI(App):
                 self._handle_remove_rich_rule,
             )
         except RuntimeError as e:
+            logger.error("{}", e)
             self.notify(str(e), severity="error")
 
     def _handle_remove_rich_rule(self, rule: str | None) -> None:
         if rule and self.current_zone:
             try:
                 if firewall.remove_rich_rule(rule, self.current_zone, self.permanent_mode):
+                    logger.info("removed rich rule from {}", self.current_zone)
                     self.notify(f"Removed rich rule from {self.current_zone}")
                     self.load_zone_details(self.current_zone)
                 else:
                     self.notify("Failed to remove rich rule", severity="error")
             except RuntimeError as e:
+                logger.error("{}", e)
                 self.notify(str(e), severity="error")
 
 
 def main() -> None:
     """Entry point for the TUI."""
+    logger.info("firewalld-tui starting")
     app = FirewalldTUI()
     app.run()
 
