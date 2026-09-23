@@ -451,7 +451,11 @@ class FirewalldTUI(App):
 
     CSS = """
     Screen {
-        layout: horizontal;
+        layout: vertical;
+    }
+
+    #body {
+        height: 1fr;
     }
 
     #sidebar {
@@ -516,9 +520,9 @@ class FirewalldTUI(App):
     }
 
     #action-bar {
-        height: auto;
-        min-height: 3;
-        dock: bottom;
+        height: 2;
+        min-height: 2;
+        layout: horizontal;
         align: center middle;
         background: $panel;
         border-top: solid $primary;
@@ -526,7 +530,19 @@ class FirewalldTUI(App):
     }
 
     #action-bar Button {
+        width: auto;
+        min-width: 14;
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
         margin: 0 1;
+        border: none;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #action-bar Button:focus {
+        text-style: bold reverse;
     }
     """
 
@@ -556,7 +572,7 @@ class FirewalldTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal():
+        with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Static("Zones", id="sidebar-title")
                 yield ListView(id="zone-list")
@@ -569,11 +585,15 @@ class FirewalldTUI(App):
                 with VerticalScroll(id="zone-details"):
                     pass
         with Horizontal(id="action-bar"):
-            yield Button("+ Add", id="tb-add-policy", variant="primary")
-            yield Button("- Delete", id="tb-del-policy", variant="error")
-            yield Button("Clone", id="tb-clone-policy")
-            yield Button("Edit", id="tb-edit-policy")
-            yield Button("Disable", id="tb-toggle-policy", variant="warning")
+            yield Button("+ Add", id="tb-add-policy", variant="primary", compact=True)
+            yield Button(
+                "- Delete", id="tb-del-policy", variant="error", compact=True
+            )
+            yield Button("Clone", id="tb-clone-policy", compact=True)
+            yield Button("Edit", id="tb-edit-policy", compact=True)
+            yield Button(
+                "Disable", id="tb-toggle-policy", variant="warning", compact=True
+            )
         yield Footer()
 
     def on_mount(self) -> None:
