@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import socket
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
+from xml.etree import ElementTree
 
 from loguru import logger
+
+SERVICES_DIR = Path("/usr/lib/firewalld/services")
 
 
 @dataclass
@@ -23,6 +29,20 @@ class ZoneInfo:
     icmp_blocks: list[str] = field(default_factory=list)
     rich_rules: list[str] = field(default_factory=list)
     source_ports: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RuleRow:
+    """A single row in the PanOS-style rules table."""
+
+    source: str
+    destination: str
+    protocol: str
+    service_port: str
+    action: str
+    kind: str  # "rich" | "service" | "port" | "source"
+    ref: str  # underlying object (service name, "8080/tcp", source, rule text)
+    detail: str  # raw detail for the lower panel
 
 
 def _run(args: list[str], check: bool = True) -> str:
@@ -355,3 +375,154 @@ def reload() -> bool:
 def runtime_to_permanent() -> bool:
     """Save runtime config to permanent config."""
     return _run_quiet(["--runtime-to-permanent"])
+
+
+def resolve_service(name: str) -> list[tuple[str, str]]:
+    """Resolve a predefined service to a list of (protocol, port).
+
+    Reads the firewalld service XML; falls back to /etc/services via
+    socket.getservbyname; ultimate fallback is (\"any\", service name).
+    """
+    results: list[tuple[str, str]] = []
+    try:
+        tree = ElementTree.parse(SERVICES_DIR / f"{name}.xml")
+        for port_el in tree.findall(".//port"):
+            proto = port_el.get("protocol", "any")
+            port = port_el.get("port", "")
+            if port:
+                results.append((proto, port))
+    except (OSError, ElementTree.ParseError):
+        logger.debug("cannot parse service XML for {}", name)
+    if results:
+        return results
+    for proto in ("tcp", "udp"):
+        try:
+            return [(proto, str(socket.getservbyname(name, proto)))]
+        except OSError:
+            continue
+    return [("any", name)]
+
+
+def parse_rich_rule(rule: str) -> dict[str, str]:
+    """Best-effort parse of a firewalld rich rule into table fields."""
+
+    def _find(pattern: str) -> str:
+        m = re.search(pattern, rule)
+        return m.group(1) if m else "any"
+
+    source = _find(r"source\s+address=['\"]([^'\"]+)['\"]")
+    destination = _find(r"destination\s+address=['\"]([^'\"]+)['\"]")
+    port = _find(r"port\s+port=['\"]([^'\"]+)['\"]")
+    protocol = _find(r"protocol=['\"]([^'\"]+)['\"]")
+    service = _find(r"service\s+name=['\"]([^'\"]+)['\"]")
+
+    action_m = re.search(r"\b(accept|drop|reject)\s*$", rule)
+    action = action_m.group(1) if action_m else "accept"
+    action = {"accept": "allow", "drop": "drop", "reject": "reject"}[action]
+
+    if service != "any":
+        service_port = service
+    elif port != "any":
+        service_port = port
+    else:
+        service_port = "any"
+
+    return {
+        "source": source,
+        "destination": destination,
+        "protocol": protocol,
+        "service_port": service_port,
+        "action": action,
+    }
+
+
+def _target_action(target: str) -> str:
+    """Map a zone target to a table action value."""
+    return {
+        "": "allow",
+        "default": "allow",
+        "ACCEPT": "allow",
+        "REJECT": "reject",
+        "%%REJECT%%": "reject",
+        "DROP": "drop",
+        "%%DROP%%": "drop",
+    }.get(target, "allow")
+
+
+def rule_rows_from_info(info: ZoneInfo) -> list[RuleRow]:
+    """Synthesize PanOS-style rule rows from a zone's configuration."""
+    rows: list[RuleRow] = []
+
+    for rule in info.rich_rules:
+        parsed = parse_rich_rule(rule)
+        rows.append(
+            RuleRow(
+                source=parsed["source"],
+                destination=parsed["destination"],
+                protocol=parsed["protocol"],
+                service_port=parsed["service_port"],
+                action=parsed["action"],
+                kind="rich",
+                ref=rule,
+                detail=rule,
+            )
+        )
+
+    for svc in info.services:
+        for proto, port in resolve_service(svc):
+            service_port = svc if port == svc else f"{svc} ({port})"
+            rows.append(
+                RuleRow(
+                    source="any",
+                    destination="any",
+                    protocol=proto,
+                    service_port=service_port,
+                    action="allow",
+                    kind="service",
+                    ref=svc,
+                    detail=f"service {svc} -> {proto}/{port}",
+                )
+            )
+
+    for port in info.ports:
+        if "/" in port:
+            port_num, proto = port.rsplit("/", 1)
+        else:
+            port_num, proto = port, "any"
+        rows.append(
+            RuleRow(
+                source="any",
+                destination="any",
+                protocol=proto,
+                service_port=port_num,
+                action="allow",
+                kind="port",
+                ref=port,
+                detail=f"port {port}",
+            )
+        )
+
+    source_action = _target_action(info.target)
+    for src in info.sources:
+        rows.append(
+            RuleRow(
+                source=src,
+                destination="any",
+                protocol="any",
+                service_port="any",
+                action=source_action,
+                kind="source",
+                ref=src,
+                detail=(
+                    f"source {src} bound to zone {info.name} "
+                    f"(target: {info.target or 'default'})"
+                ),
+            )
+        )
+
+    return rows
+
+
+def build_rule_rows(zone: str | None = None, permanent: bool = False) -> list[RuleRow]:
+    """Fetch a zone's configuration and synthesize its rule rows."""
+    return rule_rows_from_info(list_zone(zone, permanent))
